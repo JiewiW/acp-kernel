@@ -194,9 +194,12 @@ test("#199: promote via block-boundary refs (b1..b1) still works after the guard
 test("#199: message-ref range that pulls in NEW messages plus a nested block is still allowed", () => {
   const core = createCore();
   const cfg = config();
+  // 本用例验的是「范围里混进了新消息 + 嵌套块仍允许」，而不是 user 语义；这条新
+  // 消息是唯一一条 user，userVerbatimKeep 的任何取值都会保护它（0=全部，N>0 保最
+  // 后一条），必然被拒 —— 占位消息给 assistant 让它可折叠。
   const messages = [
     ...loopedView().slice(0, 3),
-    msg("raw-9", "x".repeat(6000)),
+    msg("raw-9", "x".repeat(6000), "assistant"),
     ...loopedView().slice(3),
   ];
   const state = withRefs(

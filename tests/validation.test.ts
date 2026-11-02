@@ -141,12 +141,14 @@ test("validation: range below minCompressRange is rejected", () => {
 test("validation: batch aggregate — many small ranges pass if total >= minCompressRange", () => {
   const core = createCore();
   const chunk = "x".repeat(1200);
+  // 本用例不验 user 语义：5 段范围合起来覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", chunk),
-    msg("b", chunk),
-    msg("c", chunk),
-    msg("d", chunk),
-    msg("e", chunk),
+    msg("a", chunk, "assistant"),
+    msg("b", chunk, "assistant"),
+    msg("c", chunk, "assistant"),
+    msg("d", chunk, "assistant"),
+    msg("e", chunk, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = defaultConfig(200000, {
@@ -185,9 +187,12 @@ test("validation: range with zero compressible messages (covered by non-nested b
     msg("d", longText),
   ];
   let state = setupRefs(messages);
+  // 只保留最近 1 条 user 原文：压缩范围 m00001..m00003 不含最后一条 user（d），
+  // 缺省 0 会把范围内所有 user 钉死、首段压缩失败，后续断言便无从谈起。
   const config = defaultConfig(200000, {
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
+    userVerbatimKeep: 1,
   });
 
   const first = core.applyCompression({
@@ -215,9 +220,12 @@ test("validation: block-boundary compress with 0 direct msgs but consumed blocks
   const core = createCore();
   const messages = [msg("a", longText), msg("b", longText), msg("c", longText)];
   let state = setupRefs(messages);
+  // 只保留最近 1 条 user 原文：首段范围 m00001..m00002 不含最后一条 user（c），
+  // 缺省 0 会让首段因原文保护被拒，t2 也就没有 b1 可蒸馏。
   const config = defaultConfig(200000, {
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
+    userVerbatimKeep: 1,
   });
 
   const t1 = core.applyCompression({
@@ -241,7 +249,9 @@ test("validation: block-boundary compress with 0 direct msgs but consumed blocks
 
 test("validation: all checks disabled (0s) allows any input", () => {
   const core = createCore();
-  const messages = [msg("a", "x"), msg("b", "y")];
+  // 本用例不验 user 语义：范围 m00001..m00002 覆盖整个数组（含最后一条 user），
+  // 方案 B 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
+  const messages = [msg("a", "x", "assistant"), msg("b", "y", "assistant")];
   const state = setupRefs(messages);
   const config = defaultConfig(200000, {
     preserveRecentMessages: 0,
@@ -261,11 +271,13 @@ test("validation: all checks disabled (0s) allows any input", () => {
 
 test("validation: errors are collected per-range in batch compress", () => {
   const core = createCore();
+  // 本用例不验 user 语义：第二段范围 m00003..m00004 含最后一条 user（d），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
-    msg("b", longText),
-    msg("c", longText),
-    msg("d", longText),
+    msg("a", longText, "assistant"),
+    msg("b", longText, "assistant"),
+    msg("c", longText, "assistant"),
+    msg("d", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = defaultConfig(200000, {

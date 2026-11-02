@@ -8,8 +8,8 @@ import { runPipeline, makeIO, type PipelineNode } from "../src/pipeline.js";
 import { defaultConfig } from "../src/config.js";
 import type { CompressionState, CoreMessage } from "../src/types.js";
 
-function msg(id: string, text: string): CoreMessage {
-  return { id, role: "user", contentType: "text", text };
+function msg(id: string, text: string, role: "user" | "assistant" = "user"): CoreMessage {
+  return { id, role, contentType: "text", text };
 }
 
 function stateWithRefs(messages: CoreMessage[]): CompressionState {
@@ -181,7 +181,14 @@ test("runPipeline skips nodes whose enabled predicate returns false", () => {
 test("processTurn tags every mapped message with a derived ref (end-to-end)", () => {
   const core = createCore();
   const state = createInitialState();
-  const messages = [msg("a", "alpha"), msg("b", "beta")];
+  // 用例检验的是 ref 派生与打标链路，占位消息的角色不是被检验的东西。这两个形状
+  // 的 protection 无法用配置关掉：userVerbatimKeep=0 保护全部 user，N>0 也至少
+  // 保护最后 N 条 —— 没有「一条都不保护」的取值，而这里两条都要拿到 m 编号，
+  // 因此占位消息改走 assistant 角色。
+  const messages = [
+    msg("a", "alpha", "assistant"),
+    msg("b", "beta", "assistant"),
+  ];
   const result = core.processTurn({
     messages,
     state,
@@ -201,7 +208,10 @@ test("processTurn tags every mapped message with a derived ref (end-to-end)", ()
 test('processTurn renderTags:"all" (default) injects tags into every message', () => {
   const core = createCore();
   const messages: CoreMessage[] = [
-    { id: "u1", role: "user", contentType: "text", text: "run echo" },
+    // 占位的用户轮次：本用例检验 renderTags:"all" 的打标策略，不是 user 角色本身。
+    // userVerbatimKeep 的任何取值都会保护它（0=全部 user，N>0 保护最后 N 条，而这
+    // 里它正是最后一条），拿不到 m 编号，故改成 assistant 占位。
+    { id: "u1", role: "assistant", contentType: "text", text: "run echo" },
     {
       id: "a1",
       role: "assistant",
@@ -239,7 +249,10 @@ test('processTurn renderTags:"all" (default) injects tags into every message', (
 test('processTurn renderTags:"text-only" tags text but leaves tool messages pristine (proxy mode)', () => {
   const core = createCore();
   const messages: CoreMessage[] = [
-    { id: "u1", role: "user", contentType: "text", text: "run echo" },
+    // 占位的用户轮次：本用例检验 renderTags:"text-only" 只打标 text 而放过 tool 消
+    // 息，user 角色本身不是被检验的东西；而它作为唯一的 user 消息在方案 A/B 下都会
+    // 被保护（拿不到 m 编号），故改成 assistant 占位。
+    { id: "u1", role: "assistant", contentType: "text", text: "run echo" },
     {
       id: "a1",
       role: "assistant",
@@ -300,7 +313,9 @@ test('processTurn renderTags:"text-only" tags text but leaves tool messages pris
 test('processTurn renderTags:"none" assigns refs but leaves all text untouched', () => {
   const core = createCore();
   const messages: CoreMessage[] = [
-    { id: "u1", role: "user", contentType: "text", text: "run echo" },
+    // 同上：本用例检验 renderTags:"none" 只建 ref、不动文本，占位消息的角色不是被
+    // 检验的东西；唯一 user 消息在两种方案下都会被保护，故改成 assistant 占位。
+    { id: "u1", role: "assistant", contentType: "text", text: "run echo" },
     {
       id: "a1",
       role: "assistant",

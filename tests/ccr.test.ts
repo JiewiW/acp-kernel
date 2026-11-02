@@ -82,6 +82,12 @@ function toolResult(
 
 function ccrConfig(overrides: Partial<Config["ccr"]> = {}): Config {
   return defaultConfig(100000, {
+    // 本文件的占位 user 消息形状随机（"session likes " + toolName 之类），
+    // 用例检验的是 CCR 的存储/占位符/取回链路，不是「user 消息不可折叠」。
+    // 默认 userVerbatimKeep=0（方案 A）会把全部 user 原文保护起来 → ref 变
+    // BLOCKED、进不了压缩范围。显式走方案 B 逃生阀：只保护最近 1 条 user，
+    // 把更老的占位 user 释放回可折叠状态。
+    userVerbatimKeep: 1,
     ccr: { ...DEFAULT_CCR_CONFIG, enabled: true, ...overrides },
   });
 }
@@ -587,8 +593,13 @@ test("storeCoveredOriginals persists the call subject for tool results", () => {
     toolCall("c1", "call1", "bash"),
     toolResult("r1", "call1", "bash", original),
     {
+      // 尾部占位轮次。它是这条会话里唯一的 user 消息，方案 A（0=全部）与方案
+      // B（N>0 保护最后 N 条 —— 它永远是最后一条）下都会被原文保护成 BLOCKED，
+      // 拿不到 m00003，[m00001..m00003] 这段范围也就塌了。本用例检验的是 tool
+      // result 的原文与 call subject 能被按 ref 取回，user 角色不是被检验的东
+      // 西，故改成 assistant 占位，还原原本的三条全范围覆盖。
       id: "u2",
-      role: "user",
+      role: "assistant",
       contentType: "text",
       text: "recent tail user message",
     },
@@ -689,7 +700,11 @@ test("storeLargeResults: results without toolCallId or with BLOCKED refs are ski
 
 function sessionWithBigBash(): CoreMessage[] {
   return [
-    { id: "u1", role: "user", contentType: "text", text: "build the project" },
+    // 占位轮次。原本是 role:"user"，但它作为唯一的 user 消息在方案 A 与方案 B
+    // 下都会被原文保护（0=全部 user，N>0 保护最后 N 条 —— 它永远是最后一条），
+    // ref 变 BLOCKED 会让后面的 toolResult 从 m00004 掉到 m00003。这些用例检验
+    // 的是 CCR 的入库/占位符/取回链路，不是 user 角色，故改成 assistant 占位。
+    { id: "u1", role: "assistant", contentType: "text", text: "build the project" },
     {
       id: "a1",
       role: "assistant",
@@ -922,17 +937,27 @@ test("legacy retrieval injections never enter fold space (block effectiveMessage
   const seeded = core.processTurn({
     messages,
     state: createInitialState(),
-    config: defaultConfig(100000),
+    config: defaultConfig(100000, { userVerbatimKeep: 1 }),
     tokenCount: 1000,
   });
   const compressed = core.applyCompression({
-    ranges: [{ startRef: "m00001", endRef: "m00005", summary: "S".repeat(60) }],
+    // 端到 ref 从 m00005 收到 m00004：注入的 legacy 消息不占 ref 号（它走
+    // retrieved 前缀、不上 refs），折置夹具里受保护的那条尾部 user（u3）现在是
+    // BLOCKED，排在 m00004 之后 —— 继续写 m00005 会把 a3 连同中间的 u3 一起拉
+    // 进范围，触发「受保护 user 不可压缩」的 fail-loud。折到 m00004 折出来的仍然
+    // 是原本那一段（u1, a1, u2, a2），legacy 依旧落在范围内却被排除在
+    // effectiveMessageIds 之外 —— 正是本用例要钉的行为。
+    ranges: [{ startRef: "m00001", endRef: "m00004", summary: "S".repeat(60) }],
     messages: seeded.messages,
     state: seeded.state,
     config: defaultConfig(100000, {
       compress: { minCompressRange: 0 },
       preserveRecentMessages: 1,
       preserveRecentTokens: 0,
+      // 方案 B 逃生阀：本文件折置夹具里的 user 消息都是占位（"recent tail user
+      // message" 之类），userVerbatimKeep=0 会把它们全部保护成 BLOCKED —— 拿不到
+      // m 编号、压缩范围也随之失效。只保护最近 1 条，把更老的占位 user 释放出来。
+      userVerbatimKeep: 1,
     }),
   });
   assert.equal(compressed.result.blocksCreated, 1);
@@ -1093,7 +1118,7 @@ test("storeCoveredOriginals stores folded message originals for retrieve-by-ref"
   const seeded = core.processTurn({
     messages,
     state: createInitialState(),
-    config: defaultConfig(100000),
+    config: defaultConfig(100000, { userVerbatimKeep: 1 }),
     tokenCount: 1000,
   });
   const compressed = core.applyCompression({
@@ -1104,6 +1129,10 @@ test("storeCoveredOriginals stores folded message originals for retrieve-by-ref"
       compress: { minCompressRange: 0 },
       preserveRecentMessages: 1,
       preserveRecentTokens: 0,
+      // 方案 B 逃生阀：本文件折置夹具里的 user 消息都是占位（"recent tail user
+      // message" 之类），userVerbatimKeep=0 会把它们全部保护成 BLOCKED —— 拿不到
+      // m 编号、压缩范围也随之失效。只保护最近 1 条，把更老的占位 user 释放出来。
+      userVerbatimKeep: 1,
     }),
   });
   const block = compressed.state.blocks.find((b) => b.active)!;
@@ -1167,6 +1196,10 @@ test("storeCoveredOriginals skips reasoning and keeps earlier CCR originals (fir
       compress: { minCompressRange: 0 },
       preserveRecentMessages: 1,
       preserveRecentTokens: 0,
+      // 方案 B 逃生阀：本文件折置夹具里的 user 消息都是占位（"recent tail user
+      // message" 之类），userVerbatimKeep=0 会把它们全部保护成 BLOCKED —— 拿不到
+      // m 编号、压缩范围也随之失效。只保护最近 1 条，把更老的占位 user 释放出来。
+      userVerbatimKeep: 1,
     }),
   });
   const block = compressed.state.blocks.find((b) => b.active)!;
@@ -1281,7 +1314,7 @@ test("storeCoveredOriginals never persists placeholder text as an original (#134
   const seeded = core.processTurn({
     messages,
     state: createInitialState(),
-    config: defaultConfig(100000),
+    config: defaultConfig(100000, { userVerbatimKeep: 1 }),
     tokenCount: 1000,
   });
   const compressed = core.applyCompression({
@@ -1292,6 +1325,10 @@ test("storeCoveredOriginals never persists placeholder text as an original (#134
       compress: { minCompressRange: 0 },
       preserveRecentMessages: 1,
       preserveRecentTokens: 0,
+      // 方案 B 逃生阀：本文件折置夹具里的 user 消息都是占位（"recent tail user
+      // message" 之类），userVerbatimKeep=0 会把它们全部保护成 BLOCKED —— 拿不到
+      // m 编号、压缩范围也随之失效。只保护最近 1 条，把更老的占位 user 释放出来。
+      userVerbatimKeep: 1,
     }),
   });
   const block = compressed.state.blocks.find((b) => b.active)!;
@@ -1529,7 +1566,7 @@ test("storeCoveredOriginals archives ordinary originals embedding marker example
   const seeded = core.processTurn({
     messages,
     state: createInitialState(),
-    config: defaultConfig(100000),
+    config: defaultConfig(100000, { userVerbatimKeep: 1 }),
     tokenCount: 1000,
   });
   const compressed = core.applyCompression({
@@ -1540,6 +1577,10 @@ test("storeCoveredOriginals archives ordinary originals embedding marker example
       compress: { minCompressRange: 0 },
       preserveRecentMessages: 1,
       preserveRecentTokens: 0,
+      // 方案 B 逃生阀：本文件折置夹具里的 user 消息都是占位（"recent tail user
+      // message" 之类），userVerbatimKeep=0 会把它们全部保护成 BLOCKED —— 拿不到
+      // m 编号、压缩范围也随之失效。只保护最近 1 条，把更老的占位 user 释放出来。
+      userVerbatimKeep: 1,
     }),
   });
   const block = compressed.state.blocks.find((b) => b.active)!;
@@ -1596,7 +1637,7 @@ test("storeCoveredOriginals stores foreign-ref placeholder-shaped text as a genu
   const seeded = core.processTurn({
     messages,
     state: createInitialState(),
-    config: defaultConfig(100000),
+    config: defaultConfig(100000, { userVerbatimKeep: 1 }),
     tokenCount: 1000,
   });
   const compressed = core.applyCompression({
@@ -1607,6 +1648,10 @@ test("storeCoveredOriginals stores foreign-ref placeholder-shaped text as a genu
       compress: { minCompressRange: 0 },
       preserveRecentMessages: 1,
       preserveRecentTokens: 0,
+      // 方案 B 逃生阀：本文件折置夹具里的 user 消息都是占位（"recent tail user
+      // message" 之类），userVerbatimKeep=0 会把它们全部保护成 BLOCKED —— 拿不到
+      // m 编号、压缩范围也随之失效。只保护最近 1 条，把更老的占位 user 释放出来。
+      userVerbatimKeep: 1,
     }),
   });
   const block = compressed.state.blocks.find((b) => b.active)!;

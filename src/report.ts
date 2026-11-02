@@ -166,6 +166,32 @@ export interface StatusReportOptions {
   sort?: "size" | "time" | "tool" | "age";
   limit?: number;
   meta?: StatusReportMeta;
+  /** 用户消息原文保留条数（0 = 方案 A 全部保留；N>0 = 方案 B）。不传则不显示该行。 */
+  userVerbatimKeep?: number;
+}
+
+/** 「用户消息保护」节的文本。0 与 N>0 两种措辞刻意不同：方案 A 下 user 消息
+ *  根本进不了压缩范围，模型必须知道「这段压不动」是设计而不是它选错了范围。
+ *
+ *  统计口径必须从**原始 messages** 数，不能从 `visible` 数：受保护 user 消息的
+ *  ref 是 BLOCKED，而 collectVisible 会把无 ref 的消息整个跳过 —— 从 visible 数
+ *  会恒得 0，把「全部 user 都受保护」这个最该显示的事实显示成「一条都没有」。 */
+function verbatimSection(keep: number, userStats: UserVerbStats): string[] {
+  const head =
+    keep > 0
+      ? `  userVerbatimKeep=${keep} (last ${keep} preserved; older may enter T3)`
+      : "  userVerbatimKeep=0 (all user messages preserved verbatim)";
+  return [
+    "USER MESSAGE PROTECTION",
+    head,
+    `  user messages: ${userStats.count} msgs / ${formatTokens(userStats.tokens)} tok (${pct(userStats.tokens, userStats.visibleTotal)}% of visible) — irreducible floor`,
+  ];
+}
+
+interface UserVerbStats {
+  count: number;
+  tokens: number;
+  visibleTotal: number;
 }
 
 export function buildStatusReport(
@@ -216,6 +242,16 @@ export function buildStatusReport(
     countTokens,
     limit,
     options.meta,
+    options.userVerbatimKeep,
+    // 口径：从原始 messages 数 user 消息（受保护的是 BLOCKED、无 ref，
+    // collectVisible 会把它们整个跳过）；分母仍用可见总量，与前一行同口径。
+    {
+      count: messages.filter((m) => m.role === "user").length,
+      tokens: messages
+        .filter((m) => m.role === "user")
+        .reduce((sum, m) => sum + countTokens(m.text ?? ""), 0),
+      visibleTotal: visible.reduce((sum, m) => sum + m.tokens, 0),
+    },
   );
 }
 
@@ -239,6 +275,8 @@ function renderOverview(
   countTokens: (t: string) => number,
   limit: number,
   meta: StatusReportMeta | undefined,
+  userVerbatimKeep: number | undefined,
+  userStats: UserVerbStats,
 ): string {
   const lines: string[] = [];
   const surface = surfaceLine(meta);
@@ -276,6 +314,13 @@ function renderOverview(
     lines.push(
       `  Top tools: ${topTypes.map(([t, n]) => `${t} (${pct(n, total)}%)`).join(", ")}`,
     );
+  }
+
+  // 用户消息保护节：紧跟 CONTEXT BREAKDOWN。模型读 acp_status 就是为了决定压
+  // 哪一段，不知道「user 消息受保护」就会反复构造出必然被拒的范围。
+  if (userVerbatimKeep !== undefined) {
+    lines.push("");
+    lines.push(...verbatimSection(userVerbatimKeep, userStats));
   }
 
   lines.push("");

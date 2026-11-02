@@ -111,7 +111,9 @@ describe("prune anchor pairing — exact placement (#498)", () => {
     ];
     const state = createInitialState();
     state.blocks.push(block(1, ["u2"]));
-    const out = prune(messages, state);
+    // 默认 prune 的 userVerbatimKeep=0（方案 A）会把 u0/u2/u5/u7 全部钉住，被覆盖
+    // 的 u2 就折不掉；方案 B 只保最近 1 条 user（= 末尾的 u7，它在锚点之后）。
+    const out = prune(messages, state, { userVerbatimKeep: 1 });
     assert.deepEqual(
       out.map((m) => m.id),
       ["u0", "c1", "c3", "o4", "u5", "o6", "acp_summary_b1", "u7"],
@@ -139,7 +141,10 @@ describe("prune anchor pairing — exact placement (#498)", () => {
     const messages: CoreMessage[] = [
       user("u0"),
       toolCall("c1", "tx"),
-      user("u2"),
+      // 本用例验的是「锚点不得越过不存在的 result」与孤儿 call 的剔除，不验 user
+      // 语义；被折叠的这条占位消息给 assistant —— 它若是最后一条 user，方案 B 的
+      // 任意 N 都会把它保住，prune 就钉不掉它。
+      { id: "u2", role: "assistant", contentType: "text", text: "u-u2" },
     ];
     const state = createInitialState();
     state.blocks.push(block(1, ["u2"]));

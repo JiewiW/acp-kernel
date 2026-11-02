@@ -203,11 +203,14 @@ test("validateConfig rejects malformed rules limits", () => {
 
 test("acp_rule tool-call + result are hard-excluded from compression ranges", () => {
   const core = createCore();
+  // 压缩范围覆盖整个数组，而本用例验的是「acp_rule 的 call/result 被硬排除」，
+  // 不是 user 语义：占位消息给 assistant，避免最后一条 user 被原文保护挡住折叠
+  // （方案 B 的任意 N 都保不住 —— 最后一条 user 一定落在范围内）。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall("b", "acp_rule", "call1", '{"rule":"always run tests"}'),
     toolResult("c", "call1", "Recorded rule1: always run tests"),
-    msg("d", longText),
+    msg("d", longText, "assistant"),
   ];
   const state = createInitialState();
   state.messageRefs = assignRefs(messages, {

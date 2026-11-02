@@ -35,6 +35,11 @@ function buildConfig(overrides: Partial<Config> = {}): Config {
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
     modelContextLimit: 100000,
+    // 逃生阀（方案 B）：占位 user 默认会被「原文保护」全部钉住，而本文件的 fold
+    // 范围盖住整段 m00001-m00100 —— 任意 N 都救不了（最后一条 user 总在范围内）。
+    // 于是释放到「只保最近 1 条」，并把会话末尾多铺一条 user（见 makeSession），
+    // 让受保护的那条落在 fold 范围之外。
+    userVerbatimKeep: 1,
     ...overrides,
   };
 }
@@ -47,7 +52,10 @@ const OBJECTIVE = "refactor the research runner into eight independent arms";
 
 function makeSession(): CoreMessage[] {
   const messages: CoreMessage[] = [];
-  for (let i = 0; i < 100; i++) {
+  // 101 条而非 100 条：末位多一条占位 user，作为 userVerbatimKeep=1 的受保护对象。
+  // 它排在 fold 范围（m00001-m00100，即前 100 条）之外，所以折叠照样覆盖完整的前
+  // 100 条 —— #442 的「请求落在 m00010、整段 lineage 可回溯」语义一字未改。
+  for (let i = 0; i < 101; i++) {
     const role = i === 9 ? "user" : i % 2 === 0 ? "user" : "assistant";
     const text = i === 9 ? `Please ${OBJECTIVE}.` : `message ${i} `.repeat(30);
     messages.push(msg(`m${i}`, role, text));

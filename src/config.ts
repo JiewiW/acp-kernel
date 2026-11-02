@@ -26,10 +26,15 @@ export function defaultConfig(
       minCompressRange: 5000,
       maxSummaryLength: 20000,
       minSummaryLength: 50,
+      // 改进 3 的交付态：enforce（2026-10-29 用户复审同意切 enforce，RL-5 解冻；
+      // 切换前全量复验见 改进施工-交付报告-TASK7-8-9-10-20261029.md §3）。
+      quoteFidelityMode: "enforce",
     },
     protectedTools: [],
     protectedLatestTools: [],
     preserveRecentMessages: 5,
+    // 方案 A 的语义：0 = 全部 user 消息原文保留。
+    userVerbatimKeep: 0,
     preserveRecentTokens: 5000,
     modelContextLimit,
     absorb: {
@@ -115,6 +120,20 @@ export function validateConfig(config: Config): string[] {
       config.truncate.terminalEscapeAfter < 0)
   ) {
     errors.push("truncate.terminalEscapeAfter must be an integer >= 0");
+  }
+  if (
+    config.userVerbatimKeep !== undefined &&
+    (!Number.isInteger(config.userVerbatimKeep) || config.userVerbatimKeep < 0)
+  ) {
+    errors.push("userVerbatimKeep must be an integer >= 0");
+  }
+  if (
+    config.compress.quoteFidelityMode !== undefined &&
+    config.compress.quoteFidelityMode !== "off" &&
+    config.compress.quoteFidelityMode !== "warn" &&
+    config.compress.quoteFidelityMode !== "enforce"
+  ) {
+    errors.push('compress.quoteFidelityMode must be "off", "warn" or "enforce"');
   }
   for (const tier of [config.tiers.tier2Trigger, config.tiers.tier3Trigger]) {
     if (tier < 1) errors.push("tier triggers must be >= 1");

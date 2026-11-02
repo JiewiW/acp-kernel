@@ -13,8 +13,12 @@ import { runPipeline, makeIO } from "../src/pipeline.js";
 import { defaultConfig } from "../src/config.js";
 import type { CompressionState, CoreMessage } from "../src/types.js";
 
-function msg(id: string, text: string): CoreMessage {
-  return { id, role: "user", contentType: "text", text };
+function msg(
+  id: string,
+  text: string,
+  role: CoreMessage["role"] = "user",
+): CoreMessage {
+  return { id, role, contentType: "text", text };
 }
 
 function stateWithRefs(messages: CoreMessage[]): CompressionState {
@@ -151,9 +155,11 @@ test("compression preserves tokenSnapshot", () => {
 test("processTurn: snapshot persists across turns and stabilizes tags", () => {
   const core = createCore();
   let state = createInitialState();
+  // 本用例只验 tokenSnapshot 的数值稳定性，不验 user 语义；role 给 assistant
+  // 以免被 userVerbatimKeep 保护成 BLOCKED（BLOCKED 消息不渲染 tokens 标签）。
   let messages = [
-    msg("a", "第一轮消息内容比较长一些"),
-    msg("b", "第二轮 hello world"),
+    msg("a", "第一轮消息内容比较长一些", "assistant"),
+    msg("b", "第二轮 hello world", "assistant"),
   ];
 
   let firstTagTokens: (string | undefined)[];

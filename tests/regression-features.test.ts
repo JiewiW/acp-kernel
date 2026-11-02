@@ -73,11 +73,14 @@ test("Bug 1: protected tool messages are filtered (no summary inflation)", () =>
   // the compressed set; the summary is exactly what the author wrote, so a
   // large protected tool output can never inflate/reject the summary.
   const core = createCore();
+  // 本用例不验 user 语义（验的是保护消息被剔除后摘要不被撑大），占位消息给
+  // assistant：role=user 会被 userVerbatimKeep 原文保护钉住，落在压缩范围里
+  // 会直接抛错、块建不出来。
   const messages: CoreMessage[] = [
-    msg("a", longText),
+    msg("a", longText, { role: "assistant" }),
     toolCall("b", "call1", "skill", '{"action":"read"}'),
     toolResult("c", "call1", "y".repeat(50000)),
-    msg("d", longText),
+    msg("d", longText, { role: "assistant" }),
   ];
   const config = defaultConfig(200000, {
     protectedTools: ["skill"],
@@ -137,11 +140,13 @@ test("Bug 1: protected tool messages are filtered (no summary inflation)", () =>
 
 test("Bug 2: orphaned tool-call — protected call outside range, result inside", () => {
   const core = createCore();
+  // 本用例不验 user 语义（验的是孤儿的受保护调用不被算进块），占位消息给
+  // assistant 以保证下方注释里的 ref 编号（b=m00001, c, d）仍然成立。
   const messages: CoreMessage[] = [
     toolCall("a", "call1", "skill", '{"action":"git"}'),
     toolResult("b", "call1", "secret output"),
-    msg("c", longText),
-    msg("d", longText),
+    msg("c", longText, { role: "assistant" }),
+    msg("d", longText, { role: "assistant" }),
   ];
   const config = defaultConfig(200000, {
     protectedTools: ["skill"],
@@ -197,9 +202,11 @@ test("Bug 3: defaultConfig deep-merges nested config objects", () => {
 test("Bug 4: assignRefsNode marks wildcard-matched tools as BLOCKED", () => {
   const core = createCore();
   const messages: CoreMessage[] = [
-    msg("a", "hello"),
+    // 本用例只验 assignRefsNode 把命中的工具标成 BLOCKED，不验 user 语义；
+    // 占位消息给 assistant 以免受保护后退成 BLOCKED、挤掉 mNNNNN 编号。
+    msg("a", "hello", { role: "assistant" }),
     toolCall("b", "call1", "skill-git-master", '{"action":"status"}'),
-    msg("c", "world"),
+    msg("c", "world", { role: "assistant" }),
   ];
   const config = defaultConfig(200000, {
     protectedTools: ["skill-*"],
@@ -232,9 +239,11 @@ test("Bug 4: assignRefsNode marks wildcard-matched tools as BLOCKED", () => {
 test("Bug 4: assignRefsNode marks predicate-matched tools as BLOCKED", () => {
   const core = createCore();
   const messages: CoreMessage[] = [
-    msg("a", "hello"),
+    // 同上一个用例：占位消息给 assistant，保证 BLOCKED 只由工具保护产生，
+    // 周围消息的 ref 编号不被 userVerbatimKeep 影响。
+    msg("a", "hello", { role: "assistant" }),
     toolCall("b", "call1", "custom-tool", '{"path":"/secret/.env"}'),
-    msg("c", "world"),
+    msg("c", "world", { role: "assistant" }),
   ];
   const config = defaultConfig(200000, {
     isToolProtected: (_toolName: string, toolInputText?: string) =>

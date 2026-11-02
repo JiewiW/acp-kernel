@@ -1,11 +1,24 @@
 import { assignRefs, highestUsedIndex, indexToRef } from "./refs.js";
 import { remintCoveredLiveIds } from "./instance-reid.js";
-import { prune, isSummaryMessageId } from "./prune.js";
+import {
+  prune,
+  isSummaryMessageId,
+  collectUserVerbatimIds,
+} from "./prune.js";
 import { syncBlocks } from "./sync.js";
 import { advanceSurvival, activeBlocks, blockById } from "./state.js";
 import { allocateBlockId, allocateRunId, createInitialState } from "./state.js";
 import { countMessageTokens, defaultCountTokens } from "./tokenize.js";
 import { validateConfig } from "./config.js";
+import {
+  QUOTE_LONG_CHARS,
+  QUOTE_LENGTH_COEFF,
+  QUOTE_T_HIGH,
+  QUOTE_THETA_LOOSE,
+  QUOTE_THETA_OUTER,
+  QUOTE_THETA_STRICT,
+  QUOTE_WEIGHTS,
+} from "./compression-rules.js";
 import {
   BoundaryNotFoundError,
   resolveBoundaries,
@@ -56,6 +69,7 @@ import type {
   Config,
   ContextBreakdown,
   CoreMessage,
+  MessageProvenance,
   NudgeConfig,
   NudgeDecision,
   ProcessTurnResult,
@@ -843,11 +857,19 @@ const assignRefsNode: PipelineNode = {
     const latest = hasProtection
       ? collectLatestProtected(io.messages, ctx.config)
       : undefined;
+    // 用户消息原文保护：keep=0 → 全部 user（方案 A）；keep=N>0 → 最近 N 条（方案 B）。
+    // 预先算成 id 集合，避免在谓词里做 O(n) 定位导致整体退化成 O(n²)。
+    const keptUserIds = collectUserVerbatimIds(
+      io.messages,
+      ctx.config.userVerbatimKeep ?? 0,
+    );
     // Media payloads (image/file sidecars) ride outside msg.text; folding one
     // destroys it permanently (#1188), so media messages always get a BLOCKED
     // ref — never advertised, never folded — regardless of tool-protection config.
     const protectedFn = (m: CoreMessage) =>
       hasMediaPayload(m) ||
+      // 用户消息保护：保住「先/不要/必须」这类限定强调
+      keptUserIds.has(m.id) ||
       (hasProtection
         ? isMessageProtected(m, ctx.config) ||
           (latest ? isMessageLatestProtected(m, latest) : false)
@@ -874,8 +896,13 @@ const syncBlocksNode: PipelineNode = {
 
 const pruneNode: PipelineNode = {
   name: "prune",
-  run(io) {
-    return { ...io, messages: prune(io.messages, io.state) };
+  run(io, ctx) {
+    return {
+      ...io,
+      messages: prune(io.messages, io.state, {
+        userVerbatimKeep: ctx.config.userVerbatimKeep ?? 0,
+      }),
+    };
   },
 };
 
@@ -1073,7 +1100,10 @@ const emergencyTruncateNode: PipelineNode = {
       ctx.countTokens,
       {
         protectRecentMessages: ctx.config.preserveRecentMessages,
-        includeTextMessages: true,
+        // 不再把 user/assistant 散文列为末位候选：95% 用量下切掉用户指令中段
+        // 不留痕、不带角色豁免，是「压掉了不该压的」最直接路径。
+        // 代价：末位安全阀只剩工具结果，见 terminalEscapeAfter 连锁反应。
+        includeTextMessages: false,
       },
     );
 
@@ -1406,7 +1436,40 @@ function applySingleRange(input: SingleRangeInput): SingleRangeOutcome {
     );
   }
 
+  // 摘要引用保真门（TASK-5 / 改进 3）：warn 记 warning 但不拒绝；enforce 直接抛错。
+  // 放在 validateCompressionRange 之前是计划书指定的位置；warn 模式不 throw，故不改变
+  // 既有输入错误的优先级。
+  applyQuoteFidelityGate({
+    mode: input.config.compress.quoteFidelityMode ?? "warn",
+    messages: input.messages,
+    ids: filteredIds,
+    summary: input.spec.summary,
+    maxSummaryLength: input.config.compress.maxSummaryLength,
+    warnings,
+  });
+
   validateCompressionRange(input, filteredIds, consumedBlockIds.length);
+
+  // 用户消息原文保护（方案 A/B 共用）：受保护 user 消息一旦落进压缩范围就
+  // fail-loud —— 静默剔除会让保护「看起来生效」却不留任何信号，故障无法归因
+  // （RL-4）。抛出的错误由上层 catch 转成 rangeError 回给模型。
+  // 放在 validateCompressionRange 之后：摘要为空/过短这类输入错误更具体，
+  // 优先回报，不被保护拒绝掩盖。
+  const protectedUserIds = collectUserVerbatimIds(
+    input.messages,
+    input.config.userVerbatimKeep ?? 0,
+  );
+  const hitProtectedUserIds = filteredIds.filter((id) =>
+    protectedUserIds.has(id),
+  );
+  if (hitProtectedUserIds.length > 0) {
+    const keep = input.config.userVerbatimKeep ?? 0;
+    throw new Error(
+      `Cannot compress user message(s) ${hitProtectedUserIds.join(
+        ", ",
+      )}: protected verbatim (userVerbatimKeep=${keep}; 0 = every user message). Narrow the range to exclude them, or set userVerbatimKeep to a positive count to release older user messages into compression.`,
+    );
+  }
 
   let compressedTokens = 0;
   for (const id of filteredIds) {
@@ -1496,6 +1559,610 @@ function applyPairBoundaryAdjustments(
     if (msg) ids.push(msg.id);
   }
   return ids;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 摘要引用保真门（TASK-5 / 改进 3）
+//
+// 目的：压缩摘要一旦把用户的「必须 / 不要 / 只能」这类硬约束改写掉，模型后续
+// 行为就会偏离原意，而调用方看不到任何信号。本门在压缩落地前检查：本次范围里
+// 每条 user 消息的关键措辞是否还在摘要里。
+//
+// 三种模式（`compress.quoteFidelityMode`）：off / warn（默认）/ enforce。
+// RL-5：默认值必须停在 warn，切换 enforce 需用户复审误报率报告后明确同意。
+//
+// 位置：validateCompressionRange 之前（计划书指定）。warn 模式不 throw，因此不
+// 影响既有错误优先级；enforce 模式下本门先于 validate 报错是预期行为。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ⚠️ 2026-10-29 起**不再有"整条原文不超过 N 字符就整条逐字"这条规则**。
+ *
+ * 旧口径（`QUOTE_FULL_MAX_CHARS = 500`）对短消息要求整条逐字，保真摘要
+ * 「严格按照本计划书执行任务。」与原文「严格按照本计划书，执行任务。」
+ * 只差一个逗号就被判违规 → 10 条误报。判定口径已改为**约束句 + 关键词覆盖率**
+ * （见 `missingQuoteFragmentsOf`），长度阈值只用于区分长材料（`QUOTE_LONG_CHARS`）。
+ */
+
+/**
+ * 超长消息的「必需句子」标记集 —— 逐字取自计划书，**禁删**。
+ * 注意 `先 / 再 / 别` 是单字标记，中文里出现频率很高，倾向于把更多句子判为必需；
+ * 这会降低漏报、抬高误报，误报率见 `_bc-src/case/5-误报率报告-20261027.md`。
+ */
+const QUOTE_EMPHASIS_MARKERS: readonly string[] = [
+  "必须",
+  "务必",
+  "一定",
+  "只能",
+  "只需",
+  "先",
+  "再",
+  "不要",
+  "别",
+  "禁止",
+  "重点是",
+  "must",
+  "never",
+  "don't",
+  "only",
+  "first",
+  "required",
+];
+
+/** 长度冲突降级时，首尾各保留的字符数。 */
+const QUOTE_EDGE_CHARS = 200;
+
+type QuoteFidelityMode = "off" | "warn" | "enforce";
+
+/** 匹配前的归一化：全半角统一、引号统一、空白折叠、大小写统一。 */
+export function normalizeQuoteText(text: string): string {
+  return text
+    // 全角 ASCII 区（！ .. ～）与全角空格 → 半角
+    .replace(/[\uFF01-\uFF5E]/g, (ch) =>
+      String.fromCharCode(ch.charCodeAt(0) - 0xfee0),
+    )
+    .replace(/\u3000/g, " ")
+    // 各种单/双引号统一成 ASCII 直引号（中文引号与英文引号在语义上等价）
+    .replace(/[\u2018\u2019\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201F\u2033]/g, '"')
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * 切句：按中英文句末标点与换行切分。英文句点会误切 `v0.4` 这类写法，但本函数
+ * 只用于 >500 字符的超长消息，且切碎的句子仍能各自命中标记，影响可忽略。
+ */
+function splitQuoteSentences(text: string): string[] {
+  return text
+    .split(/(?<=[。！？；!?;\n])|(?<=\.\s)/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 0);
+}
+
+/** 含任一强调标记的句子（标记集大小写不敏感）。 */
+function emphasisSentencesOf(text: string): string[] {
+  return splitQuoteSentences(text).filter((sentence) => {
+    const lowered = sentence.toLowerCase();
+    return QUOTE_EMPHASIS_MARKERS.some((marker) =>
+      lowered.includes(marker.toLowerCase()),
+    );
+  });
+}
+
+/**
+ * 一条 user 消息「必须出现在摘要里」的片段。空数组 = 该条无硬约束。
+ * 导出是为了让标定脚本与误报率复算构造「保真摘要」时用**同一份**口径。
+ *
+ * ⚠️ 2026-10-29 实测修正（根因②）：短消息**不再整条逐字**，改为**约束句**。
+ * 旧口径对 ≤500 字符的消息要求整条出现在摘要里，于是
+ * 「严格按照本计划书，执行任务。」与保真摘要「严格按照本计划书执行任务。」
+ * 只差一个逗号就被报成违规 —— 68 条标注样本上造成 10 条误报。
+ * 标点差异不该致命，所以判定改走**关键词覆盖率**（见 `quoteContainment`），
+ * 本函数只负责回答「这条消息的约束句是哪些」。
+ */
+export function requiredQuoteFragments(text: string): string[] {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return [];
+  const constraints = constraintSentencesOf(trimmed);
+  if (constraints.length > 0) return constraints;
+  // 一句硬约束都没有 → 该条没有要保的东西（保真门不查）。
+  return [];
+}
+
+
+/**
+ * 长度冲突降级：引用内容会比摘要上限还长时，改为「强调句 + 首尾各 200 字符」，
+ * 保证 warn 日志 / enforce 错误信息本身不会撑爆摘要预算。
+ */
+function degradeQuoteFragment(fragment: string, maxSummaryLength: number): string {
+  const limit = maxSummaryLength > 0 ? maxSummaryLength : Number.POSITIVE_INFINITY;
+  if (fragment.length <= limit) return fragment;
+  const sentences = emphasisSentencesOf(fragment).join(" ");
+  const head = fragment.slice(0, QUOTE_EDGE_CHARS);
+  const tail = fragment.slice(-QUOTE_EDGE_CHARS);
+  return `${sentences} …${head}…[middle omitted]…${tail}`;
+}
+
+/**
+ * 保真门真正该查的来源：用户本人这一轮说的话，以及用户贴进来的材料里
+ * 那句「外面」的说明（材料正文由 TASK-8/TASK-9 另案处理）。
+ *
+ * 除了这两类之外的 user 角色消息都是宿主注入：AGENTS.md、技能目录、运行时
+ * 上下文快照、nudge 回显、压缩检查点、子代理转述。对它们查「有没有逐字保留
+ * 用户原话」没有意义——它们本来就不是用户说的，实测占旧门输入的 92.9%
+ * （2026-10-29，全机 312 会话）。
+ */
+const QUOTE_FIDELITY_SOURCES: ReadonlySet<MessageProvenance> = new Set<
+  MessageProvenance
+>(["user-turn", "user-material"]);
+
+/**
+ * 无标签（`provenance === undefined`）→ **跳过检查**（fail-open）。
+ *
+ * 方向与 `prune.ts` 的 `isUserVerbatimProvenance` **相反**，别照抄：
+ * 这里的失效后果是「少查一次」，后果无害（不拒绝压缩）且可见（日志里门不报），
+ * 而那里的失效后果是「丢掉对用户消息的保护」，静默且违反 RL-4。
+ * 判别口诀先问「没查」还是「没保」——前者放开，后者收紧（计划书 §2 高危 1）。
+ */
+export function isQuoteFidelitySource(
+  provenance: MessageProvenance | undefined,
+): boolean {
+  return (
+    provenance !== undefined && QUOTE_FIDELITY_SOURCES.has(provenance)
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK-9 —— 两档（严 / 宽）+ 加权打分 + 关键词覆盖率
+//
+// 为什么不是六类：六类之间的边界在真实语料上分不开（误报率报告 §4），而分不开
+// 的类别只会带来调参幻觉。压成两档后，判定层只回答一件事——「这条用哪条口径」，
+// 不回答通过/不通过；通过与否由该口径自己算。
+//
+// RL-12：全部是字符串运算，无子进程、无嵌入模型、无网络请求。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 强标记（w1 的分母）。与 `QUOTE_EMPHASIS_MARKERS` 同源，但**去掉 `先`/`再`/`一定`**
+ * 这类中文高频词 —— 它们在普通叙述里到处都是，只会抬高误报带不来信息
+ * （旧门 92.9% 的误报率里这类词贡献了大部分）。
+ */
+const QUOTE_STRONG_MARKERS: readonly string[] = [
+  "必须", "务必", "只能", "不得", "禁止", "不要", "严格", "确保",
+  "must", "never", "required", "don't", "do not", "only",
+];
+
+/**
+ * 否定词（w2）：硬约束里最容易在摘要里被整句抹掉的一类，单独给权重。
+ *
+ * ⚠️ **不收单字 `别`**。中文里「别」在情绪宣泄里比在硬约束里更常见
+ * （实测样本 S032「别他妈每次…」是纯情绪，收进来就是一条板上钉钉的误报）。
+ * 代价是「别改这个文件」这类真指令会漏，按保真门的取向（宁可少报）接受。
+ */
+const QUOTE_NEGATION_MARKERS: readonly string[] = [
+  "不要", "不得", "禁止", "不许", "never", "don't", "do not",
+];
+
+/** 祈使 / 第二人称（w4）：出现即 1，不看次数（一句"请"和十句"请"信息量一样）。 */
+const QUOTE_IMPERATIVE_MARKERS: readonly string[] = [
+  "请", "帮我", "麻烦", "你", "你们", "现在", "接下来", "立即", "马上", "记得",
+];
+
+/** 语气成分：算覆盖率前剔掉，否则「的了呢吗」会把覆盖率灌水。 */
+const QUOTE_MODAL_CHARS = /[的了呢吗啊呀哦吧嘛啦罢喽]/g;
+
+/** 标识符 / 数字 / 路径（w3 与材料指认共用）。 */
+const QUOTE_IDENT_RE = /[a-z0-9_][a-z0-9_.\-/]{2,}/g;
+
+/** 材料里"结构化行"的粗略特征，用来找外面那句用户说明。 */
+const QUOTE_STRUCTURED_LINE = /^\s*(?:[-*+]|\d+[.)、]|\||#{1,6}\s|>|\$|\[|\{|\/\/|<\/?[a-z])/;
+
+/** 外面那句用户说明的字符上限 / 行数上限。 */
+const QUOTE_OUTER_MAX_CHARS = 400;
+const QUOTE_OUTER_MAX_LINES = 3;
+
+function countQuoteMarkers(text: string, needles: readonly string[]): number {
+  let count = 0;
+  for (const needle of needles) count += text.split(needle).length - 1;
+  return count;
+}
+
+/** 长度档系数 w5 的输入（字符数 → 系数）。越长系数越低：长文本做不到逐字保留。 */
+export function quoteLengthCoefficient(chars: number): number {
+  if (chars <= 120) return QUOTE_LENGTH_COEFF.short;
+  if (chars <= QUOTE_LONG_CHARS) return QUOTE_LENGTH_COEFF.medium;
+  if (chars <= 2000) return QUOTE_LENGTH_COEFF.long;
+  return QUOTE_LENGTH_COEFF.huge;
+}
+
+/**
+ * 一条用户消息的重要性打分，值域 [0,1]。
+ * `importance = w1·强标记密度 + w2·否定词数 + w3·数字/标识符密度 + w4·祈使/第二人称 + w5·长度档系数`
+ * 每个分量先各自截到 [0,1] 再加权，避免某一项（比如密度）把总分顶穿。
+ */
+export function importanceOf(text: string): number {
+  const normalized = normalizeQuoteText(text);
+  const per100 = Math.max(normalized.length, 1) / 100;
+  const strongDensity = Math.min(
+    countQuoteMarkers(normalized, QUOTE_STRONG_MARKERS) / per100,
+    1,
+  );
+  const negation = Math.min(
+    countQuoteMarkers(normalized, QUOTE_NEGATION_MARKERS) / 3,
+    1,
+  );
+  const identDensity = Math.min(
+    (normalized.match(QUOTE_IDENT_RE) ?? []).length / per100,
+    1,
+  );
+  const imperative =
+    countQuoteMarkers(normalized, QUOTE_IMPERATIVE_MARKERS) > 0 ? 1 : 0;
+  return (
+    QUOTE_WEIGHTS.w1 * strongDensity +
+    QUOTE_WEIGHTS.w2 * negation +
+    QUOTE_WEIGHTS.w3 * identDensity +
+    QUOTE_WEIGHTS.w4 * imperative +
+    QUOTE_WEIGHTS.w5 * quoteLengthCoefficient(normalized.length)
+  );
+}
+
+export type QuoteTier = "strict" | "loose";
+
+/**
+ * 这条消息用哪条口径。**只输出档位，不输出通过与否。**
+ *
+ * 规则（实测 2026-10-29，68 条标注样本上 `importance` 对「是不是指令」**分不开**，
+ * 指令组最小 0.14 < 无约束组最大 0.67，所以按 §6 兜底 **D-9C：指令一律走严档，
+ * 不参与打分**）：
+ *   1. **短消息（≤ L）→ 严档**。逐字既可行又便宜，不需要打分来省。
+ *   2. **长消息 → 默认宽档**（整条逐字本来就放不下）。
+ *   3. **长消息但硬约束密度超标 → 收回严档**（D-9D，自写长需求清单那种：
+ *      全文几百字里「必须/不得」成排）。这时只要求**约束句**逐字，不要求整条。
+ *
+ * `importance` 因此只在第 3 条里起作用 —— 它分不开「是不是指令」，但分得开
+ * 「长消息里约束密不密」，而后者恰好就是它该管的事。
+ */
+export function quoteTierOf(text: string): QuoteTier {
+  const chars = text.trim().length;
+  if (chars <= QUOTE_LONG_CHARS) return "strict";
+  return importanceOf(text) >= QUOTE_T_HIGH ? "strict" : "loose";
+}
+
+/**
+ * 关键词集合 K：去掉语气成分后的 token 集。
+ * 中文用 **2-gram**（无词典、无分词器，符合 RL-12），英文/数字按标识符切。
+ */
+export function quoteKeywordsOf(text: string): Set<string> {
+  const normalized = normalizeQuoteText(text);
+  const tokens = new Set<string>();
+  for (const match of normalized.matchAll(QUOTE_IDENT_RE)) {
+    const word = match[0].replace(/^[.\-/]+|[.\-/]+$/g, "");
+    if (word.length >= 2) tokens.add(word);
+  }
+  for (const segment of normalized.split(/[^\u4e00-\u9fff]+/)) {
+    const cleaned = segment.replace(QUOTE_MODAL_CHARS, "");
+    if (cleaned.length === 0) continue;
+    if (cleaned.length === 1) {
+      tokens.add(cleaned);
+      continue;
+    }
+    for (let i = 0; i + 2 <= cleaned.length; i += 1) {
+      tokens.add(cleaned.slice(i, i + 2));
+    }
+  }
+  return tokens;
+}
+
+/** 覆盖率 `|K ∩ Tokens(summary)| / |K|`。K 为空视为 1（没有可保的东西）。 */
+export function quoteCoverageOf(
+  keywords: ReadonlySet<string>,
+  summaryTokens: ReadonlySet<string>,
+): number {
+  if (keywords.size === 0) return 1;
+  let hit = 0;
+  for (const token of keywords) if (summaryTokens.has(token)) hit += 1;
+  return hit / keywords.size;
+}
+
+/**
+ * 材料外面那句用户说明：前 {@link QUOTE_OUTER_MAX_LINES} 个不像排版行的行，
+ * 截断到 {@link QUOTE_OUTER_MAX_CHARS} 字符。
+ *
+ * 取多行而不是只取第一行：真实任务卡常把「原话」放在第二、三行
+ * （实测 S050 的「严格按照本计划书，执行任务。」就在第二行），只取首行会整条漏掉。
+ */
+export function quoteOuterSentenceOf(text: string): string {
+  const picked: string[] = [];
+  for (const line of text.split("\n")) {
+    if (picked.length >= QUOTE_OUTER_MAX_LINES) break;
+    const trimmed = line.trim();
+    if (trimmed.length < 4) continue;
+    if (QUOTE_STRUCTURED_LINE.test(trimmed)) continue;
+    picked.push(trimmed);
+  }
+  const joined = picked.join("\n");
+  return (joined.length > 0 ? joined : text.trim()).slice(
+    0,
+    QUOTE_OUTER_MAX_CHARS,
+  );
+}
+
+/** 能指认"这是哪份材料"的标识 token：路径、文件名、错误码、版本号。取不到就是空。 */
+export function quoteIdentityTokensOf(text: string): string[] {
+  const normalized = normalizeQuoteText(text);
+  const out: string[] = [];
+  for (const match of normalized.matchAll(QUOTE_IDENT_RE)) {
+    const word = match[0].replace(/^[.\-/]+|[.\-/]+$/g, "");
+    if (word.length >= 4 || /[.\-/]/.test(word)) out.push(word);
+    if (out.length >= 24) break;
+  }
+  return [...new Set(out)].slice(0, 6);
+}
+
+/**
+ * 长材料（> L 且来源是 `user-material`）不查整条逐字，改查三件事（AC-9.4）：
+ *   1. 外面那句用户说明保住（覆盖率 ≥ θ₁）；
+ *   2. 材料的标识 token 至少命中一个（摘要能指认是哪份材料）；
+ *   3. 二者都满足才算通过。
+ */
+function missingOfLongMaterial(
+  text: string,
+  summaryTokens: ReadonlySet<string>,
+): string[] {
+  // 材料正文不查整条逐字（AC-9.4）—— 它就是放不下。而且：整份材料里一句硬约束
+  // 都检测不到时，这份材料没有要保的东西，门直接不查（D-9B 的同一条原则）。
+  if (constraintSentencesOf(text).length === 0) return [];
+  const missing: string[] = [];
+  const outer = quoteOuterSentenceOf(text);
+  const outerConstraints = constraintSentencesOf(outer);
+  if (outerConstraints.length > 0) {
+    const joined = outerConstraints.join(" ");
+    if (
+      quoteCoverageOf(quoteKeywordsOf(joined), summaryTokens) <
+      QUOTE_THETA_OUTER
+    ) {
+      missing.push(joined);
+    }
+  }
+  const identity = quoteIdentityTokensOf(text);
+  if (
+    identity.length > 0 &&
+    !identity.some((token) => summaryTokens.has(token))
+  ) {
+    missing.push(`[材料标识] ${identity.slice(0, 3).join(" / ")}`);
+  }
+  return missing;
+}
+
+/**
+ * 含硬约束的句子 —— 宽档只看这些句子，不看整条。
+ *
+ * 与 `emphasisSentencesOf` 的区别：那个用 `QUOTE_EMPHASIS_MARKERS`，里面 `先`/`再`/
+ * `一定`/`别` 是中文高频词，会把大量普通叙述判成"必需"——这正是旧口径误报的来源。
+ * 这里只认 `QUOTE_STRONG_MARKERS` 与 `QUOTE_NEGATION_MARKERS`（即 w1/w2 的那批词），
+ * 语义是：**一条消息若一句硬约束都没有，门就不该查它**。
+ *
+ * ⚠️ 2026-10-29 实测修正（根因①）：只认强标记会漏掉**祈使句**与**格式约束**：
+ *   - 「审阅 e2e-workspace/spec-v1.md」——祈使 + 宾语，无强标记词；
+ *   - 「只回复两个字」「只输出一行：FILES=<...>」——格式约束，marker 是「只」；
+ *   - 「你是测试执行者。…完成后只输出一行：PROBE_ISSUES=<...>」。
+ * 这三类在 68 条标注样本上造成 **7 条结构性漏报**（门压根不查，θ 救不了）。
+ *
+ * 修正：约束句 = 强标记 ∪ 否定 ∪ **祈使动词** ∪ **格式约束**。
+ * 祈使动词只在**句首**认（否则「你说的那个方案」这类叙述句会被误判）；
+ * 格式约束靠「只/仅 + 数量词/单位」与 `<占位符>` 认。
+ */
+export function constraintSentencesOf(text: string): string[] {
+  return splitQuoteSentences(text).filter((sentence) => {
+    const lowered = sentence.toLowerCase();
+    if (
+      QUOTE_STRONG_MARKERS.some((marker) => lowered.includes(marker)) ||
+      QUOTE_NEGATION_MARKERS.some((marker) => lowered.includes(marker))
+    ) {
+      return true;
+    }
+    // 祈使句：动词出现在句首（允许前面有「你/请/给我」等主语与客套前缀）。
+    if (isImperativeSentence(sentence)) return true;
+    // 格式约束：「只输出一行」「只回复两个字」「只建卡」。
+    if (QUOTE_FORMAT_PATTERN.test(sentence)) return true;
+    // 占位符格式：FILES=<...> / PROBE_ISSUES=<...> —— 必须是逐字保留的输出契约。
+    if (QUOTE_PLACEHOLDER_PATTERN.test(sentence)) return true;
+    return false;
+  });
+}
+
+/**
+ * 祈使动词（句首用）。取自 68 条标注样本里被判为「指令/验收标准」的真实句子：
+ * 「审阅」「读取」「列出」「调用」「执行」「输出」「回复」「重讲」「重写」「改成」…
+ *
+ * 刻意**不收**「继续」「看看」「帮我」这类过泛的词 —— 「继续」在 3 条
+ * 「没有硬约束」的样本里出现（S006/S008/S012），收进来就是板上钉钉的误报。
+ */
+const QUOTE_IMPERATIVE_VERBS: readonly string[] = [
+  "审阅", "审读", "读取", "读出", "列出", "调用", "执行", "运行", "输出", "回复",
+  "回答", "重讲", "重写", "改成", "改写", "重述", "复述", "提取", "导出",
+  "生成", "创建", "新建", "发送", "提交", "上传", "下载", "安装", "部署",
+  "打印", "统计", "检索", "查找", "搜索", "验证", "检查", "对比", "比较",
+  "翻译", "转换", "解析", "打开", "关闭", "删除", "移动", "重命名",
+];
+
+/**
+ * 句首祈使判定：去掉开头的客套/主语后，首个动词落在祈使动词表里。
+ *
+ * 允许的前缀（被剥掉后再看首个动词）：`请` `帮我` `麻烦` `给我` `你` `你们`
+ * `现在` `立刻` `马上` `接下来` `然后` `再` `先` `只` `仅` `务必` `严格`
+ * `重新` `按` `照` `直接` `继续`（`继续` 只作前缀，后面的动词才算）。
+ */
+const QUOTE_IMPERATIVE_PREFIX =
+  /^(?:请|帮我|麻烦|给我|你|你们|咱们|现在|立刻|马上|接下来|然后|再|先|只|仅|务必|严格|重新|按|照|直接|继续|需要|要)+/;
+
+/** 句首祈使动词判定。 */
+function isImperativeSentence(sentence: string): boolean {
+  const stripped = sentence
+    .trim()
+    .replace(/^[\s，,。.、：:；;]+/, "")
+    .replace(QUOTE_IMPERATIVE_PREFIX, "")
+    .trim();
+  if (stripped.length === 0) return false;
+  for (const verb of QUOTE_IMPERATIVE_VERBS) {
+    if (stripped.startsWith(verb)) return true;
+  }
+  return false;
+}
+
+/**
+ * 格式约束：「只 + 动词 + 数量/单位」「仅限」「只建」。
+ *
+ * 「只回复两个字」「只输出一行」「只建卡」这类句子约束的是**输出形态**，
+ * 丢了它就等于把验收标准丢了 —— 但它们一个强标记词都没有。
+ */
+const QUOTE_FORMAT_PATTERN =
+  /只(?:回复|输出|返回|打印|列出|写|建|改|动|留|保留|发送|执行|做|说)[^，。；！？]{0,8}?[零一二两三四五六七八九十百千万\d]/;
+
+/**
+ * 占位符输出契约：`KEY=<...>`。
+ *
+ * 形如 `FILES=<用逗号连接的文件名>`、`PROBE_ISSUES=<report.issues 的条数>`。
+ * 这类必须逐字保留 —— 它是调用方与模型之间的接口约定。
+ */
+const QUOTE_PLACEHOLDER_PATTERN = /[A-Z][A-Z0-9_]{2,}=<[^>]*>/;
+
+
+/**
+ * 单条用户消息的判定：返回缺失片段，空数组 = 通过。
+ *
+ * ⚠️ 2026-10-29 实测修正（根因②）：口径从「整条逐字」改为「**约束句逐字 + 关键词覆盖**」。
+ *
+ * 旧口径对 ≤500 字符的消息要求整条逐字出现在摘要里，于是保真摘要
+ * 「严格按照本计划书执行任务。」与原文「严格按照本计划书，执行任务。」
+ * 只差一个逗号就被判违规 —— 68 条标注样本上造成 10 条误报（漏报样例的
+ * `faithful` 版本本该通过）。标点差异不该致命，所以：
+ *
+ *   - **约束句逐字命中 → 直接通过**（保留现有强口径，不动）；
+ *   - 否则算**该约束句的关键词覆盖率**，≥ θ 才算这条约束保住了。
+ *
+ * 逐条约束句分别算，不合并 —— 合并会让「丢了一条、其余全在」被平均掉，
+ * 这正是漏报样例 M02（丢掉「不要解释，直接调用」）要抓的情形。
+ */
+export function missingQuoteFragmentsOf(
+  text: string,
+  provenance: MessageProvenance | undefined,
+  normalizedSummary: string,
+  summaryTokens: ReadonlySet<string>,
+): string[] {
+  const trimmed = text.trim();
+  const normalizedText = normalizeQuoteText(trimmed);
+  if (normalizedText.length === 0) return [];
+  // 强口径保留：整条原文在摘要里 → 直接通过。
+  if (normalizedSummary.includes(normalizedText)) return [];
+  // 全部强调句都在摘要里 → 通过（两档共用，保留现有口径）。
+  const emphasis = emphasisSentencesOf(trimmed);
+  if (
+    emphasis.length > 0 &&
+    emphasis.every((sentence) =>
+      normalizedSummary.includes(normalizeQuoteText(sentence)),
+    )
+  ) {
+    return [];
+  }
+
+  if (provenance === "user-material" && trimmed.length > QUOTE_LONG_CHARS) {
+    return missingOfLongMaterial(trimmed, summaryTokens);
+  }
+
+  // D-9B：一句硬约束都检测不到 → 门不查这条。这是本轮最重要的一条收敛 ——
+  // 旧口径对每条 user 消息都查，92.9% 的查是查在没有约束的消息上。
+  const constraints = constraintSentencesOf(trimmed);
+  if (constraints.length === 0) return [];
+
+  const tier = quoteTierOf(trimmed);
+  if (tier === "strict") {
+    // 严档：每条约束句单独算覆盖率。逐字命中直接过；否则覆盖率 ≥ θ 才算保住。
+    const missing: string[] = [];
+    for (const sentence of constraints) {
+      const normalized = normalizeQuoteText(sentence);
+      if (normalizedSummary.includes(normalized)) continue;
+      const coverage = quoteCoverageOf(quoteKeywordsOf(sentence), summaryTokens);
+      if (coverage < QUOTE_THETA_STRICT) missing.push(sentence);
+    }
+    return missing;
+  }
+  // 宽档：整条的关键 token 覆盖够就过，不要求逐字（允许改写措辞）。
+  const coverage = quoteCoverageOf(quoteKeywordsOf(trimmed), summaryTokens);
+  if (coverage >= QUOTE_THETA_LOOSE) return [];
+  return [trimmed.slice(0, QUOTE_EDGE_CHARS)];
+}
+
+
+/**
+ * 纯函数：返回范围内每条用户发言缺失的必需片段。导出是为了让单测与误报率
+ * 统计走**同一份**判定逻辑，而不是各自实现一套。
+ */
+export function quoteFidelityViolations(
+  messages: readonly CoreMessage[],
+  ids: readonly string[],
+  summary: string,
+): { messageId: string; missing: string[] }[] {
+  const normalizedSummary = normalizeQuoteText(summary);
+  const summaryTokens = quoteKeywordsOf(summary);
+  const byId = new Map<string, CoreMessage>();
+  for (const message of messages) byId.set(message.id, message);
+  const violations: { messageId: string; missing: string[] }[] = [];
+  for (const id of ids) {
+    const message = byId.get(id);
+    if (message === undefined || message.role !== "user") continue;
+    if (!isQuoteFidelitySource(message.provenance)) continue;
+    const text = message.text ?? "";
+    if (text.trim().length === 0) continue;
+    const missing = missingQuoteFragmentsOf(
+      text,
+      message.provenance,
+      normalizedSummary,
+      summaryTokens,
+    );
+    if (missing.length === 0) continue;
+    violations.push({ messageId: id, missing });
+  }
+  return violations;
+}
+
+/** 门的执行体：warn 记 warning，enforce 抛错（由上层 catch 转 rangeError）。 */
+function applyQuoteFidelityGate(input: {
+  mode: QuoteFidelityMode;
+  messages: readonly CoreMessage[];
+  ids: readonly string[];
+  summary: string;
+  maxSummaryLength: number;
+  warnings: string[];
+}): void {
+  if (input.mode === "off") return;
+  const violations = quoteFidelityViolations(
+    input.messages,
+    input.ids,
+    input.summary,
+  );
+  if (violations.length === 0) return;
+  const detail = violations
+    .map((violation) => {
+      const fragments = violation.missing
+        .map((fragment) =>
+          degradeQuoteFragment(fragment, input.maxSummaryLength),
+        )
+        .join(" | ");
+      return `message ${violation.messageId}: ${fragments}`;
+    })
+    .join(" ;; ");
+  const headline = `Summary dropped required user wording from ${violations.length} message(s) in the compressed range`;
+  if (input.mode === "enforce") {
+    throw new Error(
+      `${headline} — add the quoted text verbatim (or all of its emphasised sentences) and retry: ${detail}`,
+    );
+  }
+  input.warnings.push(
+    `${headline} (quoteFidelityMode=warn, compression allowed) — ${detail}`,
+  );
 }
 
 function validateCompressionRange(

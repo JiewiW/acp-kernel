@@ -38,22 +38,34 @@ function config(overrides: Partial<Config> = {}): Config {
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
     modelContextLimit: 100000,
+    // 本文件验的是 checkpoint carrier（#335）行为，与 user 语义无关。前三例的范围
+    // 一路盖到数组末尾，占位消息已改成 assistant（理由见 buildCarrierScenario 注释）；
+    // dsh shape 那例保留了真实的 user / tool-result 角色，方案 A（=0）会把它们全部
+    // 保护成不可压缩，第一段 range 就 fail-loud，后面的 #335 剧情根本走不到。
+    // 给 1 释放更老的占位 user。
+    userVerbatimKeep: 1,
     ...overrides,
   };
 }
 
 /** The #335 shape: a host checkpoint (user-role carrier of a prior block's
- *  summary) sits inside a later plain message-ref range. */
+ *  summary) sits inside a later plain message-ref range.
+ *
+ *  本文件验的是 carrier 的跳过/折叠行为，与 user 语义无关：判定只看
+ *  `summaryOfBlockId` 指向的 block 是否还活着，不看 role。而下面几个压缩范围的
+ *  端点跟着数组末尾走，最后一条占位 user 必然落在范围内 —— 方案 B 的任意 N 都
+ *  救不了（总有一条 user 排在最后）。所以这里的占位消息一律给 assistant，
+ *  以免被 userVerbatimKeep 保护成不可压缩。 */
 function buildCarrierScenario() {
   const core = createCore();
   let state = createInitialState();
   const messages = [
-    msg("1", "user asks to refactor"),
+    msg("1", "user asks to refactor", "assistant"),
     msg("2", "assistant plan", "assistant"),
-    msg("3", "tool result payload"),
+    msg("3", "tool result payload", "assistant"),
     msg("4", "assistant next step", "assistant"),
-    msg("5", "tool result payload two"),
-    msg("6", "user follow-up"),
+    msg("5", "tool result payload two", "assistant"),
+    msg("6", "user follow-up", "assistant"),
   ];
   state.messageRefs = assignRefs(messages, {
     existing: state.messageRefs,
@@ -73,10 +85,10 @@ function buildCarrierScenario() {
   });
   const blockA = first.state.blocks[0]!;
   messages.push({
-    ...msg("7", "checkpoint: block A summary text"),
+    ...msg("7", "checkpoint: block A summary text", "assistant"),
     summaryOfBlockId: blockA.blockId,
   });
-  messages.push(msg("8", "user later turn"));
+  messages.push(msg("8", "user later turn", "assistant"));
   state = first.state;
   state.messageRefs = assignRefs(messages, {
     existing: state.messageRefs,
@@ -127,8 +139,12 @@ test("plain message-ref range skips a live host checkpoint carrier and keeps it 
 test("block-ref boundary (bN..bM) folds host checkpoint carriers — distillation path (#335)", () => {
   const core = createCore();
   let state = createInitialState();
+  // 本用例验的是 bN..bM 蒸馏路径会跨过 carrier 继续折叠，与 user 语义无关。
+  // 三段范围连起来覆盖整段数组（1..5 / 7..11 / b1..b2 全量），每条占位 user 都
+  // 至少落在其中一段里，且总有一条排在最后 —— 方案 B 的任意 N 都释放不掉。所以
+  // 这里的占位消息一律给 assistant。
   const messages = Array.from({ length: 11 }, (_, i) =>
-    msg(`${i + 1}`, `message ${i + 1}`, i % 2 === 0 ? "user" : "assistant"),
+    msg(`${i + 1}`, `message ${i + 1}`, "assistant"),
   );
   state.messageRefs = assignRefs(messages, {
     existing: state.messageRefs,
@@ -186,15 +202,17 @@ test("stale carriers (block inactive or unknown) fold like ordinary messages", (
   state.blocks = state.blocks.map((b) =>
     b.blockId === blockA.blockId ? { ...b, active: false } : b,
   );
+  // 同上的理由：本用例不验 user 语义，且范围一直盖到数组末尾，占位消息给
+  // assistant 以免最后一条 user 被 userVerbatimKeep 保护而让整段压缩 fail-loud。
   messages.push({
-    ...msg("9", "checkpoint of a dead block"),
+    ...msg("9", "checkpoint of a dead block", "assistant"),
     summaryOfBlockId: blockA.blockId,
   });
   messages.push({
-    ...msg("10", "checkpoint of an unknown block"),
+    ...msg("10", "checkpoint of an unknown block", "assistant"),
     summaryOfBlockId: "b-nope",
   });
-  messages.push(msg("11", "tail"));
+  messages.push(msg("11", "tail", "assistant"));
   state.messageRefs = assignRefs(messages, {
     existing: state.messageRefs,
     nextIndex: 9,
@@ -306,8 +324,11 @@ test("dsh shape: plain range with tool-pair growth consumes the old block yet sk
     summaryOfBlockId: blockA.blockId,
   };
   messages.push(ckpt);
+  // 本用例不验 user 语义：第二段范围盖到数组末尾，把后续占位轮次写成 assistant，
+  // 让最后一条占位 user 落在 9 号 carrier 上 —— carrier 因 #335 被排除出范围，
+  // 自然也不会触发 userVerbatimKeep 的保护拒绝。
   for (let i = 0; i < 8; i++) {
-    messages.push(msg(`${10 + i}`, `later turn ${i}`));
+    messages.push(msg(`${10 + i}`, `later turn ${i}`, "assistant"));
   }
   state.messageRefs = assignRefs(messages, {
     existing: state.messageRefs,

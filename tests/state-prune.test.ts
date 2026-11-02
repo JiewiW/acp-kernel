@@ -22,6 +22,12 @@ function msg(id: string, role: CoreMessage["role"] = "user"): CoreMessage {
   return { id, role, contentType: "text", text: id };
 }
 
+// 本文件的 msg() 默认把每条占位消息都建成 user 角色，而用例检验的是 prune 的
+// 覆盖判定、摘要锚点与排序，不是「user 消息不得被剪」。默认（userVerbatimKeep=0，
+// 方案 A）会把这些占位 user 全部钉在线上。统一显式走方案 B 逃生阀：只保护最近
+// 1 条 user，其余占位 user 回到可被剪状态。
+const PRUNE_KEEP_1 = { userVerbatimKeep: 1 } as const;
+
 function makeBlock(
   overrides: Partial<CompressionBlock> & { blockId: string },
 ): CompressionBlock {
@@ -110,7 +116,7 @@ test("advanceSurvival increments survivedCount and promotes past threshold", () 
 test("prune returns messages unchanged when nothing is covered", () => {
   const state = createInitialState();
   const messages = [msg("a"), msg("b")];
-  assert.deepEqual(prune(messages, state), messages);
+  assert.deepEqual(prune(messages, state, PRUNE_KEEP_1), messages);
 });
 
 test("prune removes covered messages and injects summary at anchor", () => {
@@ -123,7 +129,7 @@ test("prune removes covered messages and injects summary at anchor", () => {
     }),
   );
   const messages = [msg("m1"), msg("m2"), msg("m3"), msg("m4")];
-  const result = prune(messages, state);
+  const result = prune(messages, state, PRUNE_KEEP_1);
 
   assert.equal(result.length, 3);
   assert.equal(result[0]!.id, "m1");
@@ -139,7 +145,7 @@ test("prune preserves first user message even when covered", () => {
     makeBlock({ blockId: "b1", effectiveMessageIds: ["m1", "m2"] }),
   );
   const messages = [msg("m1", "user"), msg("m2"), msg("m3")];
-  const result = prune(messages, state, { injectSummaries: false });
+  const result = prune(messages, state, { injectSummaries: false, ...PRUNE_KEEP_1 });
 
   assert.equal(result.length, 2);
   assert.equal(result[0]!.id, "m1");
@@ -150,7 +156,7 @@ test("prune without summary injection only removes covered messages", () => {
   const state = createInitialState();
   state.blocks.push(makeBlock({ blockId: "b1", effectiveMessageIds: ["m2"] }));
   const messages = [msg("m1"), msg("m2"), msg("m3")];
-  const result = prune(messages, state, { injectSummaries: false });
+  const result = prune(messages, state, { injectSummaries: false, ...PRUNE_KEEP_1 });
 
   assert.deepEqual(
     result.map((m) => m.id),
@@ -168,7 +174,7 @@ test("prune covers plain base id when block recorded sub-id projections (#231)",
     }),
   );
   const messages = [msg("h_pre"), msg("h_abc"), msg("h_post")];
-  const result = prune(messages, state);
+  const result = prune(messages, state, PRUNE_KEEP_1);
 
   assert.deepEqual(
     result.map((m) => m.id),
@@ -187,7 +193,7 @@ test("prune covers sub-id projections when block recorded plain base id (#231)",
     msg("h_abc#call1"),
     msg("h_post"),
   ];
-  const result = prune(messages, state, { injectSummaries: false });
+  const result = prune(messages, state, { injectSummaries: false, ...PRUNE_KEEP_1 });
 
   assert.deepEqual(
     result.map((m) => m.id),
@@ -201,7 +207,7 @@ test("prune covers sibling sub-id projections of the same base (#231)", () => {
     makeBlock({ blockId: "b1", effectiveMessageIds: ["h_abc#r0"] }),
   );
   const messages = [msg("h_abc#call1", "assistant"), msg("h_post")];
-  const result = prune(messages, state, { injectSummaries: false });
+  const result = prune(messages, state, { injectSummaries: false, ...PRUNE_KEEP_1 });
 
   assert.deepEqual(
     result.map((m) => m.id),
@@ -215,7 +221,7 @@ test("prune does not cover a distinct id that extends a covered base (#231)", ()
     makeBlock({ blockId: "b1", effectiveMessageIds: ["h_abc#r0"] }),
   );
   const messages = [msg("h_abcde"), msg("h_post")];
-  const result = prune(messages, state, { injectSummaries: false });
+  const result = prune(messages, state, { injectSummaries: false, ...PRUNE_KEEP_1 });
 
   assert.deepEqual(
     result.map((m) => m.id),
@@ -233,7 +239,7 @@ test("prune anchors summary at base id when block recorded sub-ids (#231)", () =
     }),
   );
   const messages = [msg("h_pre"), msg("h_abc"), msg("h_post")];
-  const result = prune(messages, state);
+  const result = prune(messages, state, PRUNE_KEEP_1);
 
   assert.deepEqual(
     result.map((m) => m.id),
@@ -253,7 +259,7 @@ test("prune orders multiple summaries by their anchor position", () => {
     }),
   );
   const messages = [msg("u", "user"), msg("w"), msg("x"), msg("z")];
-  const result = prune(messages, state);
+  const result = prune(messages, state, PRUNE_KEEP_1);
 
   assert.equal(result[0]!.id, "u");
   assert.equal(result[1]!.id, "acp_summary_b2");

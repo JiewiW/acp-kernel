@@ -456,8 +456,16 @@ function rebuildMessages(
   toolCallText: string,
   toolCallId: string,
 ): CoreMessage[] {
+  // 本用例不验 user 语义（只验历史 compress 入参能否被解析/重放），占位消息
+  // 统一给 assistant：role=user 会被 userVerbatimKeep 的原文保护拦住，导致
+  // 覆盖它的重建范围抛错、blocksRebuilt 恒为 0。
   const messages: CoreMessage[] = [
-    { id: "raw1", role: "user", contentType: "text", text: "first message" },
+    {
+      id: "raw1",
+      role: "assistant",
+      contentType: "text",
+      text: "first message",
+    },
     {
       id: "raw2",
       role: "assistant",

@@ -45,6 +45,10 @@ function config(overrides: Partial<Config> = {}): Config {
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
     modelContextLimit: 100000,
+    // 本文件验的是 #470 的门控文案与排除告警，会话里的占位消息（一半是 user）不是
+    // 被检验的对象。userVerbatimKeep=0（方案 A）会把它们全部保护起来，带 user 的
+    // 范围直接 fail-loud、根本走不到门控/告警那条路；给 1 释放更老的占位 user。
+    userVerbatimKeep: 1,
     ...overrides,
   };
 }

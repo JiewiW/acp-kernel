@@ -37,6 +37,10 @@ function config(overrides: Partial<Config> = {}): Config {
     compress: { minCompressRange: 0, maxSummaryLength: 0, minSummaryLength: 0 },
     protectedTools: [],
     preserveRecentMessages: 0,
+    // 本文件的 msg() 默认把每条消息都建成 user 角色，而用例关心的其实是
+    // ref / block / boundary 机制，不是「用户消息不可折叠」。显式走方案 B
+    // 逃生阀（只保留最近 1 条 user），让这些占位 user 消息回到可折叠状态。
+    userVerbatimKeep: 1,
     preserveRecentTokens: 0,
     modelContextLimit: 100000,
     ...overrides,
@@ -105,7 +109,7 @@ test("prune after applyCompression removes covered messages and injects summary"
     config: config(),
   });
 
-  const pruned = prune(messages, after);
+  const pruned = prune(messages, after, { userVerbatimKeep: 1 });
   assert.deepEqual(
     pruned.map((m) => m.id),
     ["u", "acp_summary_b1", "c", "d"],
@@ -184,13 +188,15 @@ test("successful compression of a reversed range reports the rewrite in notes", 
   const core = createCore();
   const state = createInitialState();
   const big = "w".repeat(1000);
+  // 占位消息一律给 assistant：本用例只验 ref 逆序归一化，不含 user 语义。
+  // user 角色在新语义下受原文保护，会让覆盖全量的范围直接 fail-loud。
   const messages = [
-    msg("a", big),
-    msg("b", big),
-    msg("c", big),
-    msg("d", big),
-    msg("e", big),
-    msg("f", big),
+    msg("a", big, "assistant"),
+    msg("b", big, "assistant"),
+    msg("c", big, "assistant"),
+    msg("d", big, "assistant"),
+    msg("e", big, "assistant"),
+    msg("f", big, "assistant"),
   ];
   state.messageRefs = assignRefs(messages, {
     existing: state.messageRefs,
@@ -330,7 +336,12 @@ test("block-boundary compression produces T2 and consumes matching T1 blocks", (
 test("processTurn assigns refs, prunes, and returns nudge decision", () => {
   const core = createCore();
   const state = createInitialState();
-  const messages = [msg("a", "hello world"), msg("b", "second message")];
+  // 占位消息给 assistant：本用例验的是「ref 从 m00001 顺序分配」这一机制，
+  // 而受保护的 user 消息拿的是 BLOCKED ref，会让下面两条断言失去意义。
+  const messages = [
+    msg("a", "hello world", "assistant"),
+    msg("b", "second message", "assistant"),
+  ];
 
   const result = core.processTurn({
     messages,
@@ -509,7 +520,7 @@ test("retrying a consumed range reports already-compressed guidance, not too-sma
     state,
     config: config(),
   });
-  const pruned = prune(messages, after);
+  const pruned = prune(messages, after, { userVerbatimKeep: 1 });
 
   const retry = core.applyCompression({
     ranges: [{ startRef: "m00002", endRef: "m00003", summary: "intro recap" }],
@@ -562,7 +573,7 @@ test("consumed plus fresh-but-small range is not misreported as too small", () =
     state,
     config: config(),
   });
-  const pruned = prune(messages, after);
+  const pruned = prune(messages, after, { userVerbatimKeep: 1 });
 
   const retry = core.applyCompression({
     ranges: [
@@ -670,7 +681,7 @@ test("consumed plus unknown ranges keep the already-compressed message", () => {
     state,
     config: config(),
   });
-  const pruned = prune(messages, after);
+  const pruned = prune(messages, after, { userVerbatimKeep: 1 });
 
   const retry = core.applyCompression({
     ranges: [
@@ -745,12 +756,15 @@ test("first compress of a fresh session with foreign refs reports a new generati
 test("refs from before a native-compaction rebase report a new generation with zeroed history (billion-context#387)", () => {
   const core = createCore();
   const oldState = createInitialState();
+  // 占位消息给 assistant：本用例验 rebase 后的世代计数与 ref 重排，
+  // 需要 5 条消息连续占住 m00001..m00005；受保护 user 会退成 BLOCKED ref，
+  // 使第二段范围 m00004..m00005 解析不到。
   const oldMessages = [
-    msg("u", "the task"),
-    msg("a", "alpha"),
-    msg("b", "beta"),
-    msg("c", "gamma"),
-    msg("d", "delta"),
+    msg("u", "the task", "assistant"),
+    msg("a", "alpha", "assistant"),
+    msg("b", "beta", "assistant"),
+    msg("c", "gamma", "assistant"),
+    msg("d", "delta", "assistant"),
   ];
   oldState.messageRefs = assignRefs(oldMessages, {
     existing: oldState.messageRefs,
@@ -771,7 +785,11 @@ test("refs from before a native-compaction rebase report a new generation with z
   assert.equal(afterTwo.stats.compressionCount, 2);
 
   const rebased = createInitialState();
-  const freshMessages = [msg("u2", "new task"), msg("e", "epsilon")];
+  // 同上：freshMessages 需占住 m00001..m00002，诊断串断言的是最高 ref=m00002。
+  const freshMessages = [
+    msg("u2", "new task", "assistant"),
+    msg("e", "epsilon", "assistant"),
+  ];
   rebased.messageRefs = assignRefs(freshMessages, {
     existing: rebased.messageRefs,
     nextIndex: 1,
@@ -889,12 +907,14 @@ test("consumed plus fresh content above threshold proceeds with a warning", () =
   const core = createCore();
   const state = createInitialState();
   const big = "z".repeat(6000);
+  // 占位消息给 assistant：本用例验「已消费范围 + 新内容」的告警路径，
+  // 依赖 m00002..m00005 四条连续可折叠消息；受保护 user 会打断编号。
   const messages = [
-    msg("u", "the task"),
-    msg("a", "alpha"),
-    msg("b", "beta"),
-    msg("c", big),
-    msg("d", "delta"),
+    msg("u", "the task", "assistant"),
+    msg("a", "alpha", "assistant"),
+    msg("b", "beta", "assistant"),
+    msg("c", big, "assistant"),
+    msg("d", "delta", "assistant"),
   ];
   state.messageRefs = assignRefs(messages, {
     existing: state.messageRefs,
@@ -907,7 +927,7 @@ test("consumed plus fresh content above threshold proceeds with a warning", () =
     state,
     config: config(),
   });
-  const pruned = prune(messages, after);
+  const pruned = prune(messages, after, { userVerbatimKeep: 1 });
 
   const retry = core.applyCompression({
     ranges: [
@@ -962,7 +982,9 @@ test("empty summary is attributed to its range", () => {
 test("invalid refs are reported per-range without failing the batch", () => {
   const core = createCore();
   const state = createInitialState();
-  const messages = [msg("a", "alpha"), msg("b", "beta")];
+  // 占位消息给 assistant：本用例验「非法 ref 逐条上报、不中断整批」，
+  // 需要一个合法范围能真的压出 block；两条都是受保护 user 时会直接 fail-loud。
+  const messages = [msg("a", "alpha", "assistant"), msg("b", "beta", "assistant")];
   state.messageRefs = assignRefs(messages, {
     existing: state.messageRefs,
     nextIndex: 1,
@@ -1030,7 +1052,7 @@ test("consumed ranges warn+skip when minCompressRange is 0", () => {
     state,
     config: config(),
   });
-  const pruned = prune(messages, after);
+  const pruned = prune(messages, after, { userVerbatimKeep: 1 });
 
   const retry = core.applyCompression({
     ranges: [{ startRef: "m00002", endRef: "m00003", summary: "intro recap" }],
@@ -1083,7 +1105,7 @@ test("resolveBoundaries throws typed BoundaryNotFoundError with kind and endpoin
     state,
     config: config(),
   });
-  const pruned = prune(messages, after);
+  const pruned = prune(messages, after, { userVerbatimKeep: 1 });
   assert.throws(
     () =>
       resolveBoundaries({

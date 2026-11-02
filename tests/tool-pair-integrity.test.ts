@@ -41,6 +41,12 @@ function toolResult(
 
 const config = (over: Record<string, unknown> = {}) => ({
   ...defaultConfig(150000),
+  // 本文件的 toolResult() 用 role:"user"（tool 结果在 wire 上的宿主惯例），加上
+  // 结尾的占位 user，默认 userVerbatimKeep=0（方案 A）会把它们全部保护成
+  // BLOCKED → 不占 mNNNNN 编号，后续编号整体前移，用例里硬编码的 m00002..m00009
+  // 全部落空。方案 B 只保留最近 1 条 user（每条用例的末条，恰好在压缩范围之后），
+  // 因此范围内的编号与原来一致。
+  userVerbatimKeep: 1,
   compress: {
     ...defaultConfig(150000).compress,
     minCompressRange: 1,

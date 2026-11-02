@@ -1,5 +1,5 @@
 import { activeBlocks, coveredMessageIds } from "./state.js";
-import type { CompressionState, CoreMessage } from "./types.js";
+import type { CompressionState, CoreMessage, MessageProvenance } from "./types.js";
 
 export const SUMMARY_HEADER = "[Compressed conversation section]";
 
@@ -62,6 +62,55 @@ export function isRenderedSummaryMessage(
 
 export interface PruneOptions {
   injectSummaries?: boolean;
+  /** 用户消息原文保留条数（方案 A=0 / 方案 B=N>0）。缺省按 0 处理 = 全部保留。 */
+  userVerbatimKeep?: number;
+}
+
+/** 算用户本人发言的来源集合：用户这一轮说的话，以及用户贴进来的材料。 */
+const USER_VERBATIM_PROVENANCES: ReadonlySet<MessageProvenance> = new Set<
+  MessageProvenance
+>(["user-turn", "user-material"]);
+
+/**
+ * 是否算「用户原文」，受 RL-4 保护。
+ *
+ * ⚠️ **`provenance === undefined` 必须返回 true（继续保护）**。这个分支省不得：
+ * 老宿主与老持久化数据没有来源标签，省掉它等于一夜之间把这些宿主上对用户消息
+ * 的原文保护全部撤掉，且**不报错、不可见**——违反 RL-4 的正是这种静默失效。
+ *
+ * 注意方向与保真门相反：那里无标签是「跳过检查」（少查一次，无害且可见），
+ * 这里是「继续保护」。判别口诀：先问这层失效是「没查」还是「没保」——
+ * 前者放开，后者收紧。详见计划书 §2 高危 1。
+ */
+export function isUserVerbatimProvenance(
+  provenance: MessageProvenance | undefined,
+): boolean {
+  return (
+    provenance === undefined || USER_VERBATIM_PROVENANCES.has(provenance)
+  );
+}
+
+/** 受原文保护的 user 消息 id 集合。
+ *  keep = 0（方案 A）→ 全部用户发言；keep = N > 0（方案 B）→ 最近 N 条。
+ *  只认 `user-turn` / `user-material` / 无标签：宿主注入行（AGENTS.md、技能目录、
+ *  运行时上下文、检查点）同样是 role === "user"，但它们被压缩掉正是我们想要的，
+ *  保护它们会让「受保护原文」里塞满注入文本（实测旧口径误判率 92.9%）。
+ *  预先算成 id 集合是必需的：protectedFn 对每条消息各调用一次，
+ *  若在谓词内部用 indexOf 定位角色下标会退化成 O(n²)。 */
+export function collectUserVerbatimIds(
+  messages: CoreMessage[],
+  keep: number,
+): Set<string> {
+  const userIndices: number[] = [];
+  messages.forEach((message, index) => {
+    if (message.role !== "user") return;
+    if (!isUserVerbatimProvenance(message.provenance)) return;
+    userIndices.push(index);
+  });
+  const kept = keep > 0 ? userIndices.slice(-keep) : userIndices;
+  const ids = new Set<string>();
+  for (const index of kept) ids.add(messages[index]!.id);
+  return ids;
 }
 
 export function prune(
@@ -97,7 +146,12 @@ export function prune(
   return stripOrphanedReasoning(
     stripOrphanedToolResults(
       stripOrphanedToolCalls(
-        rebuildMessages(messages, coveredBases, firstUserIndex, anchors),
+        rebuildMessages(messages, coveredBases, firstUserIndex, anchors, {
+          userVerbatimIds: collectUserVerbatimIds(
+            messages,
+            options.userVerbatimKeep ?? 0,
+          ),
+        }),
       ),
     ),
   );
@@ -260,6 +314,7 @@ function rebuildMessages(
   coveredBases: Set<string>,
   firstUserIndex: number,
   anchors: SummaryAnchor[],
+  options: { userVerbatimIds?: Set<string> } = {},
 ): CoreMessage[] {
   const ix = anchors.length > 0 ? buildAnchorPairingIndex(messages) : null;
   const safeAnchors = anchors
@@ -286,6 +341,15 @@ function rebuildMessages(
     // range strip the last guaranteed user message off the wire. Strict
     // providers reject conversations with no user message. See DESIGN.md §8.1.
     if (index === firstUserIndex && firstUserIndex >= 0) {
+      result.push(messages[index]!);
+      continue;
+    }
+    // 用户消息原文保护：受保护集合内的 user 消息即便已被活跃块覆盖也留在线上，
+    // 与上面的首条钉一起构成「至少一条 user + 受保护 user」双重保证。
+    if (
+      messages[index]!.role === "user" &&
+      (options.userVerbatimIds?.has(messages[index]!.id) ?? false)
+    ) {
       result.push(messages[index]!);
       continue;
     }

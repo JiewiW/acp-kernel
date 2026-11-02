@@ -39,6 +39,10 @@ function config(): Config {
     protectedTools: [],
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
+    // 本文件 msg() 的占位消息默认是 user 角色。走方案 B 逃生阀（只保留最近 1 条
+    // user），让参与压缩的占位 user 回到可折叠状态——本文件验的是 block↔ref 映射，
+    // 不是「用户消息不可折叠」。
+    userVerbatimKeep: 1,
     modelContextLimit: 100000,
   };
 }
@@ -160,7 +164,9 @@ test("resolveBlockSpan ignores mixed m-ref / block-ID specs", () => {
 test("tier-distilled block created via bN..bM boundaries reports an m-ref span", () => {
   const core = createCore();
   let state = createInitialState();
-  const messages = Array.from({ length: 20 }, (_, i) =>
+  // 尾部补一条占位 user：方案 B 下受保护的是「最近 1 条 user」，让它落在
+  // m00001..m00020 两段范围之外，id1..id20 才能稳定占住 m00001..m00020。
+  const messages = Array.from({ length: 21 }, (_, i) =>
     msg(`id${i + 1}`, `message ${i + 1}`),
   );
   state.messageRefs = assignRefs(messages, {

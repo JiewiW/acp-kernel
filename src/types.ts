@@ -5,6 +5,33 @@ export type MessageRole = "user" | "assistant" | "system" | "tool";
 export type MessageContentType =
   "text" | "tool-call" | "tool-result" | "reasoning";
 
+/**
+ * 消息来源标签（TASK-7 / TASK-8）。
+ *
+ * 保真门要查的是「用户本人的原话」，但 role === "user" 这一层在真实宿主上
+ * 只表示「由宿主以 user 角色投喂」——AGENTS.md 注入、技能目录、nudge 回显、
+ * 运行时上下文快照、子代理转述、压缩检查点全都是 user 角色。实测全机 312 个
+ * 会话里 1151 条是真用户发言，其余 92.9% 都是注入（2026-10-29，脚本
+ * `_bc-src/case/provenance-coverage-probe.mjs`）。门必须靠这个字段收窄输入。
+ *
+ * 七值（设计文档 §3.2）：
+ *  - `user-turn`        用户本人这一轮说的话
+ *  - `user-material`    用户粘贴/附上的材料（日志、代码、文档），见 TASK-8
+ *  - `host-policy`      宿主策略文本（AGENTS.md、技能目录、未知插件行）
+ *  - `host-content`     宿主投喂的真实内容通道（运行时上下文快照、ptc、审批）
+ *  - `engine-metadata`  引擎自己的行（nudge 回显、compress 存根、developer 行）
+ *  - `checkpoint`       宿主渲染的压缩检查点
+ *  - `relay`            子代理转述（subagent-report / subagent-settled）
+ */
+export type MessageProvenance =
+  | "user-turn"
+  | "user-material"
+  | "host-policy"
+  | "host-content"
+  | "engine-metadata"
+  | "checkpoint"
+  | "relay";
+
 export interface CoreMessage {
   id: string;
   role: MessageRole;
@@ -12,6 +39,14 @@ export interface CoreMessage {
   text?: string;
   toolName?: string;
   toolCallId?: string;
+  /**
+   * 来源标签（TASK-7）。**可选**：老宿主与老持久化数据没有这个字段，
+   * 缺失时一律按「无标签」处理，两条方向相反的纪律见消费方注释：
+   *  - `compress.ts` 的 `quoteFidelityViolations`：无标签 → **跳过检查**（fail-open，无害且可见）；
+   *  - `prune.ts` 的 `collectUserVerbatimIds`：无标签 → **继续保护**（RL-4，否则静默丢保护）。
+   * 同一个 `provenance === undefined` 两处方向相反，改任何一边前先看计划书 §2 高危 1。
+   */
+  provenance?: MessageProvenance;
   /** Host-projected token count of the reasoning/thinking payload that rides
    *  along with this message every request but is NOT part of `text` (e.g. Pi's
    *  `{type:"thinking"}` parts, which are resent each turn but invisible in the
@@ -358,6 +393,16 @@ export interface CompressValidationConfig {
   maxSummaryLength: number;
   /** Minimum summary length (chars). Summary shorter than this is rejected. 0 = disabled. Default 50. */
   minSummaryLength: number;
+  /**
+   * 摘要引用保真门（改进 3）：
+   * - `off`     整体停用（门代码保留）；
+   * - `warn`    只记 warning、不拒绝（**默认**，RL-5 要求交付态是 warn）；
+   * - `enforce` 丢失必需引文时 throw，经上层 catch 转成 rangeError 回给模型。
+   *
+   * 判定口径：范围内每条 user 消息的原文（≤500 字符时）或它的全部强调句
+   * （>500 字符时）必须出现在摘要里。详见 `compress.ts` 的 applyQuoteFidelityGate。
+   */
+  quoteFidelityMode?: "off" | "warn" | "enforce";
 }
 
 export interface Config {
@@ -396,6 +441,11 @@ export interface Config {
    *  unset or empty = no subtraction (pure no-op). */
   preserveRecentTools?: string[];
   preserveRecentMessages: number;
+  /** 用户消息原文保留条数。0（默认）= 方案 A：全部 user 消息原文保留，永不进压缩范围；
+   *  N>0 = 方案 B 逃生阀：只保留最近 N 条，更老的允许进 T3（仍须过引用保真门）。
+   *  与 preserveRecentMessages 不同轴 —— 后者是 truncate 的位置保护（最后 N 条、不分角色）。
+   *  用 0 而非 Infinity 表示「全部」：配置值要过宿主 settings 层的 JSON 序列化。 */
+  userVerbatimKeep?: number;
   preserveRecentTokens: number;
   modelContextLimit: number;
   /** Instant tool-result absorption (see absorb.ts). Absent/disabled = feature off. */

@@ -120,11 +120,16 @@ describe("adjustBoundariesForReasoningPairs", () => {
 });
 
 describe("compression with reasoning-pair protection", () => {
+  // userVerbatimKeep: 1 —— 方案 B 逃生阀：占位 textMsg/toolResult 多是 user 角色，
+  // 默认 0 会把它们全部钉住（ref 退成 BLOCKED → 后续 mNNNNN 整体前移、
+  // 落进范围还会 fail-loud throw）。放掉更老的 user 后 reasoning 对的
+  // 「只压一半 → 另一半被自动拉进来」场景才能继续构造，断言一条不少。
   const cfg = {
     ...defaultConfig(100000),
     compress: { ...defaultConfig(100000).compress, minCompressRange: 0 },
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
+    userVerbatimKeep: 1,
   };
 
   it("compression auto-includes companion text after reasoning", () => {
@@ -263,11 +268,14 @@ describe("compression with reasoning-pair protection", () => {
 
   it("uncompressed reasoning pair survives intact when another range is compressed", () => {
     const core = createCore();
+    // 本用例不验 user 语义，验的是「另一个 reasoning 对被压时，未压的对要完整存活」，
+    // 且范围覆盖数组尾部的 m5/m6：把占位消息（m1/m4）显式给 assistant，避免占位 user
+    // 被保护后退成 BLOCKED、把尾部的硬编码 ref m00005..m00006 整体前移。
     const messages = [
-      textMsg("m1"),
+      textMsg("m1", "assistant"),
       reasoning("m2"),
       assistantText("m3"),
-      textMsg("m4"),
+      textMsg("m4", "assistant"),
       reasoning("m5"),
       assistantText("m6"),
     ];
@@ -389,6 +397,7 @@ describe("regression: DeepSeek split-compress does not orphan a reasoning pair (
     compress: { ...defaultConfig(100000).compress, minCompressRange: 0 },
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
+    userVerbatimKeep: 1,
   };
 
   it("compressing only the reasoning does not orphan the companion assistant text", () => {

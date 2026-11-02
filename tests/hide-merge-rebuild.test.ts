@@ -216,6 +216,10 @@ test("rebuildCompressionState replays historical compress tool calls", () => {
     compress: { minCompressRange: 0, maxSummaryLength: 0, minSummaryLength: 0 },
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
+    // raw1/raw4 只是把会话撑起来的占位 user：默认 userVerbatimKeep=0（方案 A）
+    // 会把它们连同被重放的 m00001..m00002 一并保护，重建拿不到 Refs 也折不动。
+    // 方案 B 只保最近 1 条（末条 raw4 在重建范围之外）。
+    userVerbatimKeep: 1,
   });
   const result = rebuildCompressionState(
     createInitialState(),

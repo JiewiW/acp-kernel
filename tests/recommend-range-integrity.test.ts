@@ -37,6 +37,10 @@ function config(overrides: Partial<Config> = {}): Config {
     compress: { minCompressRange: 0, maxSummaryLength: 0, minSummaryLength: 0 },
     protectedTools: [],
     preserveRecentMessages: 0,
+    // 默认 userVerbatimKeep=0（方案 A）会把 u0/u1 全部锁成不可折叠，fixture 的
+    // head 折叠（m00001..m00002，含首条 user u0）直接失败。方案 B 只保最近 1 条
+    // user（= 末尾的 u1，本就在保护区/折叠范围之外），释放更早的占位 user。
+    userVerbatimKeep: 1,
     preserveRecentTokens: 0,
     modelContextLimit: 100000,
     ...overrides,

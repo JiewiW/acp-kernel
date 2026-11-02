@@ -33,11 +33,26 @@ function config(overrides: Partial<Config> = {}): Config {
     },
     promotionThreshold: 5,
     truncate: { threshold: 1 },
-    compress: { minCompressRange: 0, maxSummaryLength: 0, minSummaryLength: 0 },
+    compress: {
+      minCompressRange: 0,
+      maxSummaryLength: 0,
+      minSummaryLength: 0,
+      // 本文件验的是 preserveRecentMessages 这条「位置保护」轴，与摘要引用保真门
+      // 无关：合成消息的摘要本来就不引用原文，warn 模式会额外记一条警告，把
+      // 「这里应该有 1 条 / 0 条 warning」这类断言的计数搅乱。只关这一个维度，
+      // 断言值与数值一律保留。
+      quoteFidelityMode: "off",
+    },
     protectedTools: [],
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
     modelContextLimit: 100000,
+    // 本文件验的是 preserveRecentMessages 这条「位置保护」轴，与 userVerbatimKeep
+    // 是互不相关的两条轴（数值也不共用）。但 EIGHT 等占位消息默认角色是 user，
+    // userVerbatimKeep=0（方案 A）会把它们全部保护起来，让验证「越界部分仍可压缩」
+    // 的用例直接 fail-loud；给 1 释放更老的占位 user —— 只动 userVerbatimKeep，
+    // preserveRecentMessages 的既有断言与数值一律保留。
+    userVerbatimKeep: 1,
     ...overrides,
   };
 }

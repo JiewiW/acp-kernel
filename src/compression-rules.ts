@@ -101,6 +101,101 @@ FORMAT:
 
 SIZE TARGET: 50-150 tokens per source block (excluding the header). If you can't fit it in 150 tokens, you're keeping too much process. If a block has nothing worth keeping (pure noise), output just the header followed by "[no actionable content]."`;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK-9 —— 保真门两档判定的常量（权重 / 阈值）
+//
+// 全部集中在 `compress.ts` 之外，是为了让标定脚本与运行时读同一份数字：
+// 阈值只能来自 `case/quote-fidelity-calibrate.ts` 在标注样本上扫出的区间，
+// 不接受手调。改这些值必须重跑 SG-10 并把新区间写回这里。
+//
+// 置信标签：**实测 2026-10-29**，样本 `case/quote-fidelity-fixtures-20261028.json`
+// （68 条真实会话样本，人工标注三值 + 类型）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Opt-in 的两档保真规则（TASK-10）：告诉模型「什么样的用户话必须逐字留、什么样的
+ * 留关键词就够」，让门从"事后检查"变成"事前就该写对"。
+ *
+ * 照 upstream #493 `LANGUAGE_PRESERVATION_RULE` 的写法：**加在规则文本后面、
+ * 默认关闭**，所以默认的系统提示与现状**逐字节一致**（AC-10.1），不付出 token、
+ * 不晃前缀缓存。宿主通过 `resolvePrompts(…, { quoteFidelityTiers: true })` 打开。
+ *
+ * 口径必须与 `compress.ts` 的两档判定一致，否则提示词教的和门查的不是一回事：
+ *  - 严档（硬约束密集的消息）：整条或全部约束句逐字保留；
+ *  - 宽档（其余）：只要求关键 token 覆盖，允许改写措辞；
+ *  - 长材料：不要求整条逐字，但要保住外面那句说明，并写清这是哪份材料。
+ */
+export const QUOTE_FIDELITY_TIER_RULE =
+  "User-wording fidelity is two-tier. STRICT — messages whose wording carries hard constraints (must/never/only/禁止/不要/不得): keep the constraint sentences verbatim, or the whole message when it is short. LOOSE — every other user message: rewriting is allowed, but every key token (paths, identifiers, versions, numbers, error strings) must survive. PASTED MATERIAL (logs, stack traces, config, documents): never try to keep it whole; keep the one sentence the user wrote around it verbatim, plus one line saying which material it was (file name, error code, or path).";
+
+/** 长材料门槛 L（字符）。短消息不存在"整条放不下"的问题。 */
+export const QUOTE_LONG_CHARS = 500;
+
+/** 长度档系数 w5 的输入：四档各自的系数。越长 → 系数越低 → importance 越低 → 越倾向宽档。 */
+export const QUOTE_LENGTH_COEFF = {
+  /** ≤120 字符 */
+  short: 1,
+  /** 120–500 */
+  medium: 0.62,
+  /** 500–2000 */
+  long: 0.34,
+  /** >2000 */
+  huge: 0.12,
+} as const;
+
+/**
+ * `importance` 权重（和为 1）。
+ * w1 强标记密度 / w2 否定词数 / w3 数字·标识符密度 / w4 祈使·第二人称 / w5 长度档系数。
+ * 归一化规则见 `compress.ts` 的 `importanceOf`：每个分量都先截到 [0,1] 再加权。
+ */
+export const QUOTE_WEIGHTS = {
+  w1: 0.34,
+  w2: 0.2,
+  w3: 0.12,
+  w4: 0.2,
+  w5: 0.14,
+} as const;
+
+/**
+ * 档位阈值。**只对长消息生效**（短消息一律严档，D-9C，不打分）：
+ * 长消息的 `importance >= T_HIGH` 说明它硬约束密度超标（自写长需求清单），
+ * 收回严档（D-9D）；否则宽档。
+ *
+ * `T_LOW` 目前不参与判定 —— 实测 `importance` 分不开「是不是指令」，只分得开
+ * 「长消息约束密不密」，所以没有第二个可用的切点。保留字段是为了将来滞后切换。
+ * 改这两个值必须重跑 SG-10，并把新区间写回这里。
+ */
+export const QUOTE_T_HIGH = 0.4;
+export const QUOTE_T_LOW = 0.25;
+
+/**
+ * 严档的**每条约束句**关键词覆盖率门槛 θ。
+ *
+ * 口径（计划书 §5 做法 3）：`containment = |K ∩ Tokens(summary)| / |K|`，
+ * K 为去掉语气成分后的关键词集合。约束句**逐字**命中摘要时直接通过（强口径）；
+ * 否则按覆盖率判。
+ *
+ * ⚠️ 2026-10-29 实测修正（根因②）：旧口径对短消息要求**整条**逐字，
+ * 于是「严格按照本计划书执行任务。」与原文「严格按照本计划书，执行任务。」
+ * 只差一个逗号就被判违规 → 10 条误报。改成按**约束句**算覆盖率后，
+ * 标点差异不再致命，同时「丢了一条约束、其余全在」仍会被抓到。
+ */
+export const QUOTE_THETA_STRICT = 0.56;
+
+/**
+ * 宽档的**整条**关键词覆盖率门槛 θ。宽档允许改写措辞，只要求关键 token 存活。
+ *
+ * 2026-10-29 标定（SG-10）：θ 带实测 (0.5588, 1]（应报侧最大覆盖率 0.5588 =
+ * M04:miss-fixture 边缘，应过侧最小 1），两档常量同取 0.56 落在带内 ——
+ * 低于带下限时 M04 类边缘漏网（coverage 0.5588 ≥ 0.55 过门）。
+ */
+export const QUOTE_THETA_LOOSE = 0.56;
+
+/**
+ * 长材料「外面那句用户说明」的覆盖率门槛 θ₁（比 θ 更严：那句是唯一真正要保的）。
+ */
+export const QUOTE_THETA_OUTER = 0.7;
+
 export const TIER3_CONDENSE_RULES = `TIER 3 COMPRESSION — ULTRA-CONDENSATION
 
 You are compressing distilled summaries (Tier 2) into ultra-condensed facts (Tier 3). The distilled summaries already contain only decisions and outcomes. Your job is to reduce them to bare factual references.

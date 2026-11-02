@@ -8,6 +8,9 @@ import type { CompressionBlock, CoreMessage } from "../src/types.js";
 
 const HASH = "h_0123456789abcdef";
 const EARLY = "h_aaaaaaaaaaaaaaaa";
+// 折叠之后会话又推进了一轮的追加 user：方案 B（userVerbatimKeep=1）只保护最近
+// 1 条 user，让被折叠原文的那条 echo（HASH）重新回到可剪状态。
+const LATER = "h_1111111111111111";
 
 function msg(
   id: string,
@@ -170,19 +173,30 @@ test("post-fold resend of the folded original stays covered and pruned (#462 e2e
   const core = createCore();
   const state = seededFoldState();
   // Pass A: the original "都按推荐来" still live (pre-fold shape).
+  // 注：config 走方案 B（只保护最近 1 条 user 原文）。默认的 userVerbatimKeep=0
+  // 会把每个 user 都钉在线上，被折叠原文的 echo 反而永远剪不掉。
+  const cfg = defaultConfig(100000, { userVerbatimKeep: 1 });
   const passA = core.processTurn({
-    messages: [msg(EARLY, "帮我看看这段代码"), msg(HASH, "都按推荐来")],
+    messages: [
+      msg(EARLY, "帮我看看这段代码"),
+      msg(HASH, "都按推荐来"),
+      msg(LATER, "后来又补充了一句"),
+    ],
     state,
-    config: defaultConfig(100000),
+    config: cfg,
     tokenCount: 300,
   });
   // Pass B: the stateless host resends the SAME raw history. This is the
   // folded original's echo — #459 renumbered it, prune then missed it, and
   // the summarized content re-inflated the wire every turn.
   const result = core.processTurn({
-    messages: [msg(EARLY, "帮我看看这段代码"), msg(HASH, "都按推荐来")],
+    messages: [
+      msg(EARLY, "帮我看看这段代码"),
+      msg(HASH, "都按推荐来"),
+      msg(LATER, "后来又补充了一句"),
+    ],
     state: passA.state,
-    config: defaultConfig(100000),
+    config: cfg,
     tokenCount: 300,
   });
   assert.ok(

@@ -156,6 +156,10 @@ test("a blank echo survives the full pipeline and a history fold", () => {
   const config = {
     ...base,
     compress: { ...base.compress, minCompressRange: 0, minSummaryLength: 0 },
+    // 本用例只验「空白 reasoning_content 全程存活」，历史 user 消息只是推进到
+    // 尾部 turn 的台阶。默认 userVerbatimKeep=0（方案 A）会把三条 user 全部保护
+    // 成不可折叠，压缩范围必然撞保护 → 走方案 B 只保留最近 1 条 user。
+    userVerbatimKeep: 1,
   };
   const body: OpenAIRequestBody = {
     model: "deepseek-v4-flash",
@@ -198,12 +202,19 @@ test("a blank echo survives the full pipeline and a history fold", () => {
     (m) => m.role === "user" && m.text === "step three",
   );
   assert.ok(anchor, "anchor user message present");
-  const anchorRef = Number(turn.state.messageRefs.byRaw[anchor!.id]!.slice(1));
+  // 「step three」是会话里最近的一条 user，无论 userVerbatimKeep 取 0 还是 N>0
+  // 它都受原文保护 → ref 退成 BLOCKED，拿不到 mNNNNN，也就不能用 anchorRef-1
+  // 推上界。上界改取 anchor 前一条消息的真实 ref（语义不变：压缩 step three
+  // 之前的全部历史）。
+  const anchorIndex = turn.messages.indexOf(anchor!);
+  const endRef =
+    turn.state.messageRefs.byRaw[turn.messages[anchorIndex - 1]!.id];
+  assert.ok(endRef, "message before the anchor must carry a ref");
   const applied = core.applyCompression({
     ranges: [
       {
         startRef: "m00001",
-        endRef: `m${String(anchorRef - 1).padStart(5, "0")}`,
+        endRef,
         summary: "steps one and two recap",
       },
     ],

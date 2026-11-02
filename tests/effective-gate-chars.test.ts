@@ -44,6 +44,10 @@ function buildConfig(overrides: Partial<Config> = {}): Config {
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
     modelContextLimit: 100000,
+    // 逃生阀（方案 B）：userVerbatimKeep 默认 0 会把所有 user 钉住，本文件压的是
+    // 「整段 CJK 散文的原始字符数」，这些占位消息的 user 角色是不小心撞上的保护。
+    // 释放到「只保最近 1 条」后，被计量的那 6 条照样全部可压（见 cjkMessages）。
+    userVerbatimKeep: 1,
     ...overrides,
   };
 }
@@ -53,12 +57,23 @@ function buildConfig(overrides: Partial<Config> = {}): Config {
 const cjkTokenizer = (text: string): number => text.length;
 
 function cjkMessages(charsPerMessage: number, count: number): CoreMessage[] {
-  return Array.from({ length: count }, (_, i) => ({
+  const cjkText = "内容".repeat(charsPerMessage / 2);
+  const messages: CoreMessage[] = Array.from({ length: count }, (_, i) => ({
     id: `raw-${i}`,
     role: i % 2 === 0 ? "user" : "assistant",
     contentType: "text",
-    text: "内容".repeat(charsPerMessage / 2),
+    text: cjkText,
   }));
+  // 末位再补一条占位 user：userVerbatimKeep=1 钉的是「数组里最后一条 user」，补一条
+  // 让它落在 m00001..m00006 之外。这样被计量的前 count 条一条不少地拿到原始编号，
+  // 「总计 3000/6000 字符」的用例前提保持不变（新增的那条不进任何 range）。
+  messages.push({
+    id: "tail-protected",
+    role: "user",
+    contentType: "text",
+    text: cjkText,
+  });
+  return messages;
 }
 
 test("mergeRangesToThreshold: batches by real chars, not tokens*4 (CJK tokenizer)", () => {

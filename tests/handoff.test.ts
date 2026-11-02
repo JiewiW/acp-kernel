@@ -111,9 +111,12 @@ test("renderHandoff full view shows every original message", () => {
 });
 
 test("renderHandoff folded view injects the block summary and drops the covered message", () => {
+  // 本用例验的是「折叠视图注入摘要、丢掉被覆盖的消息」，不验 user 语义；被覆盖
+  // 的那条占位消息给 assistant —— renderHandoff 内部的 prune 不接受 options，
+  // 它若作为最后一条 user 就会被原文保护钉住（方案 B 的任意 N 都保不住）。
   const messages = [
     msg("m1", "user", "hello"),
-    msg("m2", "user", "secret-covered"),
+    msg("m2", "assistant", "secret-covered"),
     msg("m3", "assistant", "hi"),
   ];
   const state = createInitialState();

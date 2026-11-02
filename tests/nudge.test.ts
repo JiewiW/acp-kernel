@@ -28,6 +28,11 @@ function buildConfig(overrides: Partial<Config> = {}): Config {
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
     modelContextLimit: 100000,
+    // 本文件验的是 nudge 的数值/门控行为，压缩只是为了重置基线，与 user 语义
+    // 无关。makeMessages 生成的占位消息一半是 user，userVerbatimKeep=0（方案 A）
+    // 会把它们全部保护起来，带 user 的范围就会 fail-loud；给 1 释放更老的占位
+    // user，让 applyCompression 真的造出块来重置基线。
+    userVerbatimKeep: 1,
     ...overrides,
   };
 }
@@ -828,8 +833,12 @@ test("arbitration: sub-threshold tail folds into preceding batch (pendingT1 span
       minSummaryLength: 0,
     },
   });
+  // 本用例验的是 #309 的 merge-to-threshold 仲裁：尾部不够门槛的子批合并进前面
+  // 的批，最终只剩一条清单门限的 range。与 user 语义无关，而这条 range 覆盖整段
+  // 数组，最后一条占位 user 必在其中 —— 方案 B 的任意 N 都释放不掉（受保护 user
+  // 会被判定为不可压缩，pendingT1 直接掉 0）。占位消息一律给 assistant。
   const messages = Array.from({ length: 10 }, (_, i) =>
-    textMessage(i % 2 === 0 ? "user" : "assistant", `m${i}`, "x".repeat(800)),
+    textMessage("assistant", `m${i}`, "x".repeat(800)),
   );
   let state = createInitialState();
   state = core.processTurn({

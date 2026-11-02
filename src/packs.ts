@@ -14,7 +14,10 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import * as path from "node:path";
-import { LANGUAGE_PRESERVATION_RULE } from "./compression-rules.js";
+import {
+  LANGUAGE_PRESERVATION_RULE,
+  QUOTE_FIDELITY_TIER_RULE,
+} from "./compression-rules.js";
 import type { Prompts } from "./prompts.js";
 import type { CompressPromptSections, ToolPrompts } from "./surface-config.js";
 import type { NudgePromptSections } from "./nudge-text.js";
@@ -241,15 +244,22 @@ PRIORITY when compacting: 1. user goal/evolution/intent/hard constraints · 2. d
 
 Format: dense scannable bullets under short thematic headers, not narrative prose; every line earns its place. Do not mimic the style of existing summaries in context; follow these rules.`;
 
-/** Lean-pack how-to-compress with the opt-in language-preservation rule (#493).
- * `false` (the default) returns the base text untouched — the builtin lean
- * surface stays byte-identical; hosts that enabled the rule pass `true` and
- * get it appended. Mirrors resolvePrompts' languagePreservation for the lean
- * surface (whose howToCompress slot does not flow through resolvePrompts). */
-export function leanHowToCompress(languagePreservation = false): string {
-  return languagePreservation
-    ? `${LEAN_HOW_TO_COMPRESS}\n\n${LANGUAGE_PRESERVATION_RULE}`
-    : LEAN_HOW_TO_COMPRESS;
+/** Lean-pack how-to-compress with the opt-in add-on rules (#493 language
+ * preservation, TASK-10 two-tier user-wording fidelity). Both default to
+ * `false`, which returns the base text untouched — the builtin lean surface
+ * stays byte-identical; hosts that enabled a rule pass `true` and get it
+ * appended. Mirrors resolvePrompts' opt-ins for the lean surface (whose
+ * howToCompress slot does not flow through resolvePrompts). */
+export function leanHowToCompress(
+  languagePreservation = false,
+  quoteFidelityTiers = false,
+): string {
+  const extras: string[] = [];
+  if (languagePreservation) extras.push(LANGUAGE_PRESERVATION_RULE);
+  if (quoteFidelityTiers) extras.push(QUOTE_FIDELITY_TIER_RULE);
+  return extras.length === 0
+    ? LEAN_HOW_TO_COMPRESS
+    : `${LEAN_HOW_TO_COMPRESS}\n\n${extras.join("\n\n")}`;
 }
 
 /** Token-lean surface: one-line tool descriptions, no snippets or guidelines.

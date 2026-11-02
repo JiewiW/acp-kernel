@@ -64,6 +64,11 @@ function buildMessages(): CoreMessage[] {
 
 const config = (over: Record<string, unknown> = {}) => ({
   ...defaultConfig(150000),
+  // 本文件的 toolResult() 用 role:"user"，加上每条用例末尾的占位 user：默认
+  // userVerbatimKeep=0（方案 A）会把它们全部保护成 BLOCKED → 不占 mNNNNN 编号，
+  // 用例里按位置硬写的 m00003..m00007 全部错位。方案 B 只保最近 1 条 user（每条
+  // 用例的末条，恰好在校验范围之外），范围内的编号与 turn 边界断言保持原样。
+  userVerbatimKeep: 1,
   compress: {
     ...defaultConfig(150000).compress,
     minCompressRange: 1,

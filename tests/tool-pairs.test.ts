@@ -136,11 +136,15 @@ describe("adjustBoundariesForToolPairs", () => {
 });
 
 describe("compression with tool-pair protection", () => {
+  // userVerbatimKeep: 1 —— 方案 B 逃生阀：释放更老的占位 user 消息（默认 0 会把
+  // 所有 user 钉住，工具result/text 占位消息大多建成了 user 角色），这样每种工具
+  // 对场景仍能构造出「两个成员都被压进同一个范围」的情形，工具对完整性断言一条不少。
   const cfg = {
     ...defaultConfig(100000),
     compress: { ...defaultConfig(100000).compress, minCompressRange: 0 },
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
+    userVerbatimKeep: 1,
   };
 
   it("compression auto-includes orphaned tool-result", () => {
@@ -359,11 +363,14 @@ describe("compression with tool-pair protection", () => {
 });
 
 describe("prune stripOrphanedToolCalls (defense-in-depth)", () => {
+  // 同上：逃生阀释放更老的占位 user，工具result 占位消息保持 user 角色，
+  // stripOrphaned* 的两侧（被压/未压）仍能各自成立。
   const cfg = {
     ...defaultConfig(100000),
     compress: { ...defaultConfig(100000).compress, minCompressRange: 0 },
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
+    userVerbatimKeep: 1,
   };
 
   it("complete pair survives when other pair is compressed", () => {

@@ -52,6 +52,9 @@ function config(overrides: Partial<Config> = {}): Config {
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
     modelContextLimit: 100000,
+    // 只保留最近 1 条 user 原文：本文件的占位消息默认 role 是 user，
+    // 若沿用缺省 0（保护全部 user）会把占位消息全钉死，导致压缩范围被拒。
+    userVerbatimKeep: 1,
     ...overrides,
   };
 }
@@ -122,13 +125,15 @@ test("compressibleRanges use real assigned refs, not array-index arithmetic", ()
   const state = createInitialState();
   // A protected tool-call sits in the middle: it gets BLOCKED and skips a
   // number, so c's real ref is m00002 (not m00003 as index arithmetic gives).
+  // 本用例不验 user 语义：占位消息显式给 assistant，否则「最近 1 条 user 原文
+  // 保护」会把尾部 user 变成 BLOCKED，受保护尾部整体前移，endRef 也随之错位。
   const messages = [
-    msg("a", "alpha content"),
+    msg("a", "alpha content", "assistant"),
     toolCall("p", "skill"),
     msg("c", "gamma content", "assistant"),
-    msg("d", "delta content"),
+    msg("d", "delta content", "assistant"),
     msg("e", "epsilon content", "assistant"),
-    msg("f", "zeta content"),
+    msg("f", "zeta content", "assistant"),
     msg("g", "eta content", "assistant"),
   ];
 
@@ -149,8 +154,8 @@ test("compressibleRanges use real assigned refs, not array-index arithmetic", ()
   assert.ok(ranges.length >= 1, "compressible ranges reported");
 
   // Protected tool messages are classified separately, not into compressibleMsgs.
-  // So compressible a,c,d,e,g form ranges with REAL assigned refs:
-  // a=m00001, c=m00002, d=m00003, e=m00004. (f=m00005 is last user msg, protected by Rule 3.)
+  // So compressible a,c,d,e form ranges with REAL assigned refs:
+  // a=m00001, c=m00002, d=m00003, e=m00004. (f,g are the protected tail.)
   const range = ranges[0]!;
   assert.equal(
     range.startRef,
@@ -412,11 +417,13 @@ test("batch: overlapping ranges warn and skip (earliest wins) instead of failing
 
 test("batch: non-overlapping ranges all succeed", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组，方案 B 的任意 N 都救不了最后
+  // 一条 user，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", "x".repeat(2000)),
-    msg("b", "x".repeat(2000)),
-    msg("c", "x".repeat(2000)),
-    msg("d", "x".repeat(2000)),
+    msg("a", "x".repeat(2000), "assistant"),
+    msg("b", "x".repeat(2000), "assistant"),
+    msg("c", "x".repeat(2000), "assistant"),
+    msg("d", "x".repeat(2000), "assistant"),
   ];
   const state = createInitialState();
   state.messageRefs = assignRefs(messages, {
@@ -440,12 +447,14 @@ test("batch: non-overlapping ranges all succeed", () => {
 
 test("batch: disjoint range still compresses when two others overlap", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组，方案 B 的任意 N 都救不了最后
+  // 一条 user，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", "x".repeat(2000)),
-    msg("b", "x".repeat(2000)),
-    msg("c", "x".repeat(2000)),
-    msg("d", "x".repeat(2000)),
-    msg("e", "x".repeat(2000)),
+    msg("a", "x".repeat(2000), "assistant"),
+    msg("b", "x".repeat(2000), "assistant"),
+    msg("c", "x".repeat(2000), "assistant"),
+    msg("d", "x".repeat(2000), "assistant"),
+    msg("e", "x".repeat(2000), "assistant"),
   ];
   const state = createInitialState();
   state.messageRefs = assignRefs(messages, {
@@ -482,11 +491,13 @@ test("batch: disjoint range still compresses when two others overlap", () => {
 
 test("batch: overlap resolved deterministically regardless of input order", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组，方案 B 的任意 N 都救不了最后
+  // 一条 user，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", "x".repeat(2000)),
-    msg("b", "x".repeat(2000)),
-    msg("c", "x".repeat(2000)),
-    msg("d", "x".repeat(2000)),
+    msg("a", "x".repeat(2000), "assistant"),
+    msg("b", "x".repeat(2000), "assistant"),
+    msg("c", "x".repeat(2000), "assistant"),
+    msg("d", "x".repeat(2000), "assistant"),
   ];
   const state = createInitialState();
   state.messageRefs = assignRefs(messages, {

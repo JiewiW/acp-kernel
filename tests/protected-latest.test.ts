@@ -16,8 +16,12 @@ import {
 import { buildCompressibleRanges } from "../src/recommend.js";
 import { applyAbsorb, isAbsorbCandidate } from "../src/absorb.js";
 
-function msg(id: string, text: string): CoreMessage {
-  return { id, role: "user", contentType: "text", text };
+function msg(
+  id: string,
+  text: string,
+  role: CoreMessage["role"] = "user",
+): CoreMessage {
+  return { id, role, contentType: "text", text };
 }
 
 function todoCall(id: string, callId: string, rev: number): CoreMessage {
@@ -69,6 +73,10 @@ function latestCfg(overrides: Record<string, unknown> = {}) {
     preserveRecentMessages: 0,
     preserveRecentTokens: 0,
     protectedLatestTools: ["todo_list"],
+    // 方案 B 逃生阀：本文件验的是 protectedLatestTools 的工具保护语义，
+    // 占位的 user 文本消息不该被 userVerbatimKeep 的原文保护（keep=0 全部保留）
+    // 钉住；只保留最近 1 条 user，更老的允许进压缩范围。
+    userVerbatimKeep: 1,
     ...overrides,
   });
 }
@@ -143,11 +151,14 @@ test("isMessageLatestProtected: matches latest call and its paired result only",
 
 test("processTurn: only the latest todo_list pair is BLOCKED; older pairs keep refs", () => {
   const core = createCore();
+  // 本用例不验 user 语义（验的是只有最新 todo 对被判 BLOCKED），占位消息给
+  // assistant：最后一条 user 落在「最近 1 条保留」范围内会被判 BLOCKED，
+  // 下方断言的 m00001..m00004 编号会整体位移。
   const messages: CoreMessage[] = [
-    msg("a", "start"),
+    msg("a", "start", "assistant"),
     todoCall("c1", "t1", 1),
     todoResult("r1", "t1", 1),
-    msg("b", "middle"),
+    msg("b", "middle", "assistant"),
     todoCall("c2", "t2", 2),
     todoResult("r2", "t2", 2),
   ];
@@ -168,11 +179,13 @@ test("processTurn: only the latest todo_list pair is BLOCKED; older pairs keep r
 
 test("applyCompression: latest pair excluded from block, older pair folded", () => {
   const core = createCore();
+  // 本用例不验 user 语义（验的是最新 todo 对被排除在块外），且范围 m00001..m00006
+  // 覆盖整个数组 —— 方案 B 的任何 N 都救不了最后一条 user，占位消息给 assistant。
   const messages: CoreMessage[] = [
-    msg("a", "x".repeat(6000)),
+    msg("a", "x".repeat(6000), "assistant"),
     todoCall("c1", "t1", 1),
     todoResult("r1", "t1", 1),
-    msg("b", "x".repeat(6000)),
+    msg("b", "x".repeat(6000), "assistant"),
     todoCall("c2", "t2", 2),
     todoResult("r2", "t2", 2),
   ];
@@ -242,11 +255,13 @@ test("applyCompression: superseded pair is folded once a newer pair exists", () 
 
 test("applyCompression: protectedTools (hard) excludes ALL pairs, unlike protectedLatestTools", () => {
   const core = createCore();
+  // 同上一个用例：范围 m00001..m00006 覆盖整个数组，占位消息给 assistant
+  // 以免最后一条 user 被原文保护拦住压缩（本用例只验 protectedTools 的硬保护）。
   const messages: CoreMessage[] = [
-    msg("a", "x".repeat(6000)),
+    msg("a", "x".repeat(6000), "assistant"),
     todoCall("c1", "t1", 1),
     todoResult("r1", "t1", 1),
-    msg("b", "x".repeat(6000)),
+    msg("b", "x".repeat(6000), "assistant"),
     todoCall("c2", "t2", 2),
     todoResult("r2", "t2", 2),
   ];

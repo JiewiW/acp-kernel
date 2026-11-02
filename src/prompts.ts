@@ -2,6 +2,7 @@ import {
   COMPRESS_PHILOSOPHY,
   HOW_TO_COMPRESS_RULES,
   LANGUAGE_PRESERVATION_RULE,
+  QUOTE_FIDELITY_TIER_RULE,
   TIER2_DISTILL_RULES,
   TIER3_CONDENSE_RULES,
 } from "./compression-rules.js";
@@ -54,6 +55,13 @@ export interface ResolvePromptsOptions {
    * does NOT require `acknowledgeRisk`. Default off: the resolved prompts are
    * byte-identical to {@link defaultPrompts}. */
   languagePreservation?: boolean;
+  /** Opt in to the two-tier user-wording fidelity rule (TASK-10): appends
+   * {@link QUOTE_FIDELITY_TIER_RULE} to all four canonical rule texts, so the
+   * model knows up front which user wording must stay verbatim and which may be
+   * paraphrased — the same two tiers `compress.ts`'s quote-fidelity gate
+   * enforces. Additive only, default off: the resolved prompts stay
+   * byte-identical to {@link defaultPrompts} (AC-10.1). */
+  quoteFidelityTiers?: boolean;
 }
 
 /**
@@ -87,13 +95,17 @@ export function resolvePrompts(
     );
   }
   const merged: Prompts = { ...defaultPrompts, ...clean };
-  if (options.languagePreservation) {
-    return {
-      compressPhilosophy: `${merged.compressPhilosophy}\n- ${LANGUAGE_PRESERVATION_RULE}`,
-      howToCompressRules: `${merged.howToCompressRules}\n\n${LANGUAGE_PRESERVATION_RULE}`,
-      tier2DistillRules: `${merged.tier2DistillRules}\n\n${LANGUAGE_PRESERVATION_RULE}`,
-      tier3CondenseRules: `${merged.tier3CondenseRules}\n\n${LANGUAGE_PRESERVATION_RULE}`,
-    };
-  }
-  return merged;
+  // 两个 opt-in 都是**追加**、都不需要 acknowledgeRisk：它们只能往规则文本后面
+  // 加内容，无法删改既有的承重措辞。都关着的时候原样返回，字节不差一个（AC-10.1）。
+  const rules: string[] = [];
+  if (options.languagePreservation) rules.push(LANGUAGE_PRESERVATION_RULE);
+  if (options.quoteFidelityTiers) rules.push(QUOTE_FIDELITY_TIER_RULE);
+  if (rules.length === 0) return merged;
+  const blockSuffix = `\n\n${rules.join("\n\n")}`;
+  return {
+    compressPhilosophy: `${merged.compressPhilosophy}\n- ${rules.join("\n- ")}`,
+    howToCompressRules: `${merged.howToCompressRules}${blockSuffix}`,
+    tier2DistillRules: `${merged.tier2DistillRules}${blockSuffix}`,
+    tier3CondenseRules: `${merged.tier3CondenseRules}${blockSuffix}`,
+  };
 }

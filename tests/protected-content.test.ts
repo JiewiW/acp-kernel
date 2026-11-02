@@ -64,11 +64,13 @@ function cfg(overrides: Partial<Config> = {}): Config {
 
 test("Feature 2: protected tool-call is excluded from compression range", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall("b", "skill", "call1", '{"name":"git-master"}'),
     toolResult("c", "call1", "skill output"),
-    msg("d", longText),
+    msg("d", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = cfg({ protectedTools: ["skill"] });
@@ -122,11 +124,13 @@ test("Feature 2: protected tool-call is excluded from compression range", () => 
 
 test("Feature 2: protected tool messages are filtered out, not appended", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall("b", "skill", "call1", '{"name":"git-master"}'),
     toolResult("c", "call1", "skill output"),
-    msg("d", longText),
+    msg("d", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = cfg({ protectedTools: ["skill"] });
@@ -174,11 +178,13 @@ test("Feature 2: protected tool messages are filtered out, not appended", () => 
 
 test("Feature 2: non-protected tool-call is NOT excluded", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall("b", "bash", "call1", '{"command":"ls"}'),
     toolResult("c", "call1", "file1\nfile2"),
-    msg("d", longText),
+    msg("d", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = cfg({ protectedTools: ["skill"] });
@@ -207,8 +213,10 @@ test("Feature 2: non-protected tool-call is NOT excluded", () => {
 
 test("Feature 2: compress tool itself is always protected", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall(
       "b",
       "compress",
@@ -216,7 +224,7 @@ test("Feature 2: compress tool itself is always protected", () => {
       '{"content":[{"startId":"m00001","endId":"m00001","summary":"test"}]}',
     ),
     toolResult("c", "call1", "compressed"),
-    msg("d", longText),
+    msg("d", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = cfg({ protectedTools: ["compress"] });
@@ -241,11 +249,13 @@ test("Feature 2: compress tool itself is always protected", () => {
 
 test("Feature 3: isToolProtected custom predicate excludes matching tools", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall("b", "write", "call1", '{"path":"/secret/.env"}'),
     toolResult("c", "call1", "written"),
-    msg("d", longText),
+    msg("d", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = cfg({
@@ -280,11 +290,13 @@ test("Feature 3: isToolProtected custom predicate excludes matching tools", () =
 
 test("Feature 3: wildcard pattern in protectedTools works", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall("b", "skill-git-master", "call1", "{}"),
     toolResult("c", "call1", "done"),
-    msg("d", longText),
+    msg("d", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = cfg({ protectedTools: ["skill-*"] });
@@ -305,11 +317,13 @@ test("Feature 3: wildcard pattern in protectedTools works", () => {
 
 test("Feature 3: predicate returning false does not protect", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall("b", "bash", "call1", '{"command":"ls"}'),
     toolResult("c", "call1", "output"),
-    msg("d", longText),
+    msg("d", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = cfg({
@@ -333,13 +347,15 @@ test("Feature 3: predicate returning false does not protect", () => {
 
 test("Feature 2+3: both protectedTools and isToolProtected work together", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall("b", "skill", "call1", "{}"),
     toolResult("c", "call1", "skill out"),
     toolCall("d", "edit", "call2", '{"path":"secrets/key.pem"}'),
     toolResult("e", "call2", "edited"),
-    msg("f", longText),
+    msg("f", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = cfg({
@@ -380,8 +396,10 @@ test("Feature 2+3: both protectedTools and isToolProtected work together", () =>
 
 test("compress tool is ALWAYS protected, even with empty protectedTools", () => {
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall(
       "b",
       "compress",
@@ -393,7 +411,7 @@ test("compress tool is ALWAYS protected, even with empty protectedTools", () => 
       }),
     ),
     toolResult("c", "call1", "compressed"),
-    msg("d", longText),
+    msg("d", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   // No protectedTools configured at all — compress must still be protected.
@@ -423,8 +441,10 @@ test("compress tool-result is protected by toolCallId pairing even without toolN
   // Hosts often project a tool-result with only toolCallId (no toolName).
   // The result half of a compress call must still be protected via pairing.
   const core = createCore();
+  // 本用例不验 user 语义：压缩范围覆盖整个数组（含最后一条 user），方案 B
+  // 的任意 N 都救不了它，故占位消息显式给 assistant 以免受原文保护。
   const messages = [
-    msg("a", longText),
+    msg("a", longText, "assistant"),
     toolCall("b", "compress", "callX", "{}"),
     {
       id: "c",
@@ -433,7 +453,7 @@ test("compress tool-result is protected by toolCallId pairing even without toolN
       toolCallId: "callX",
       text: "result".repeat(50),
     },
-    msg("d", longText),
+    msg("d", longText, "assistant"),
   ];
   const state = setupRefs(messages);
   const config = cfg({ protectedTools: [] });

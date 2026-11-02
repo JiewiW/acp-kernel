@@ -349,7 +349,9 @@ test("applyCompression excludes media messages from the block and warns", () => 
     ],
     messages,
     state,
-    config: config(),
+    // 逃生阀（方案 B）：本用例要验「非媒体的普通消息（含用户那条 the task）照样
+    // 被折叠」，所以必须把老 user 释放出来；媒体消息仍由 hasMediaPayload 独立保护。
+    config: config({ userVerbatimKeep: 1 }),
   });
 
   assert.equal(
@@ -456,8 +458,12 @@ test("buildCompressibleRanges never spans a media tool_result and never strands 
 test("applyCompression keeps a media tool_result and its paired call visible together", () => {
   const core = createCore();
   const state = createInitialState();
+  // 本用例验的是「媒体 tool_result 与其配对的 call 一起被撤出 (pair atomicity)」，
+  // 与 user 语义无关：u/u2 只是区间里的占位散文，却被期望一起折进块（下方断言要求
+  // directMessageIds 恰为 ["u","u2"]）。折叠范围覆盖整个数组，方案 B 的任意 N 都留
+  // 不住最后一条 user，故把这两条占位消息显式给 assistant，以免被原文保护钉住。
   const messages = [
-    textMsg("u", "user", "the task"),
+    textMsg("u", "assistant", "the task"),
     {
       id: "call",
       role: "assistant" as const,
@@ -467,7 +473,7 @@ test("applyCompression keeps a media tool_result and its paired call visible tog
       text: "{}",
     },
     mediaToolResult("res", "done\n"),
-    textMsg("u2", "user", "and now?"),
+    textMsg("u2", "assistant", "and now?"),
   ];
   state.messageRefs = assignRefs(messages, {
     existing: state.messageRefs,

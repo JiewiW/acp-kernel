@@ -123,7 +123,10 @@ test("applyCompression records projected thinking in block compressedTokens", ()
   const core = createCore();
   const state = createInitialState();
   const messages = [
-    msg("a", "alpha beta", "user"),
+    // 本用例只验 thinking 计量进了 block.compressedTokens，压缩范围覆盖整个数组；
+    // 占位消息给 assistant 以免被 user 原文保护拦下（方案 B 的任意 N 都保不住：
+    // 唯一的 user 一定在范围内）。
+    msg("a", "alpha beta", "assistant"),
     msg("b", "gamma delta", "assistant", 4321),
   ];
   state.messageRefs = assignRefs(messages, {

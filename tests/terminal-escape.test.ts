@@ -149,9 +149,11 @@ test("streak resets when usage drops below truncate.threshold", () => {
 test("successful applyCompression resets terminalStreak", () => {
   const core = createCore();
   const cfg = defaultConfig(100000);
+  // 本用例要的是「一次成功的压缩」，而默认（方案 A）下 user 消息不可进压缩范围
+  // 会 fail-loud。被压内容与「谁说的」无关，故占位消息一律给 assistant。
   const messages: CoreMessage[] = [
-    msg("u1", "x".repeat(20000)),
-    msg("a1", "done", "assistant"),
+    msg("a1", "x".repeat(20000), "assistant"),
+    msg("a2", "done", "assistant"),
   ];
   const state = stateWithRefs(messages);
   state.terminalStreak = 3;
@@ -161,7 +163,7 @@ test("successful applyCompression resets terminalStreak", () => {
       {
         startRef: "m00001",
         endRef: "m00002",
-        summary: "User made a long request; assistant completed it fully.",
+        summary: "Assistant produced a long analysis; the follow-up confirmed it.",
       },
     ],
     messages,
@@ -333,7 +335,7 @@ test("candidatesFound distinguishes zero candidates from unsavable candidates", 
   );
 });
 
-test("processTurn broadens truncation: oversized assistant text truncated at >=95%", () => {
+test("processTurn keeps user/assistant text out of the emergency-truncate candidates", () => {
   const core = createCore();
   const cfg = defaultConfig(100000);
   const messages: CoreMessage[] = [
@@ -355,15 +357,47 @@ test("processTurn broadens truncation: oversized assistant text truncated at >=9
   const truncated = result.messages.filter((m) =>
     m.text?.includes("[truncated for context space"),
   );
+  // 文本消息不再是末位候选：散文（含用户指令）在紧急档位保持完整。
   assert.ok(
-    truncated.some((m) => m.id === "big-a"),
-    "assistant text truncated",
+    !truncated.some((m) => m.id === "big-a"),
+    "assistant text must NOT be emergency-truncated",
   );
   assert.ok(!truncated.some((m) => m.id === "sys"), "system prompt intact");
+
+  // 方案 A 的已知代价：u1/u2/u3 受原文保护后，保护窗口外只剩 big-a 一条可压内容，
+  // 凑不出一个可压缩区间（maxPending=0）→ 记一次 stuck。这是 TASK-2 的预期交互，
+  // 不是回归：截断仍然没有发生，只是「可压缩的余量」变少了。
   assert.equal(
-    result.terminalEscape,
-    undefined,
-    "truncation saved tokens -> not stuck",
+    result.nudge!.breakdown.maxPending,
+    0,
+    "方案 A 下：user 全量受保护，可压缩余量为 0",
   );
-  assert.equal(result.state.terminalStreak, 0);
+  assert.equal(
+    result.state.terminalStreak,
+    1,
+    "方案 A 下：无可截亦无可压 -> 记一次 stuck（escape 需 3 次）",
+  );
+  assert.equal(result.terminalEscape, undefined);
+
+  // 逃生阀（方案 B）应当把 user 文本重新放回压缩余量，从而解除 stuck。
+  const released = core.processTurn({
+    messages,
+    state: createInitialState(),
+    config: { ...cfg, userVerbatimKeep: 1 },
+    tokenCount: 96000,
+  });
+  assert.ok(
+    released.nudge!.breakdown.maxPending > 0,
+    "方案 B 下：更老的 user 消息回到压缩余量",
+  );
+  assert.equal(
+    released.state.terminalStreak,
+    0,
+    "方案 B 下：文本仍可走正常压缩通路 -> 不算 stuck",
+  );
+  assert.equal(released.terminalEscape, undefined);
+  assert.ok(
+    !released.messages.some((m) => m.text?.includes("[truncated for context space")),
+    "方案 B 下文本同样不被紧急截断",
+  );
 });

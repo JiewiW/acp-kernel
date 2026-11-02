@@ -45,6 +45,11 @@ function config(overrides: Partial<Config> = {}): Config {
     preserveRecentMessages: 5,
     preserveRecentTokens: 0,
     modelContextLimit: 100000,
+    // 方案 B 逃生阀：本文件验的是 prune 之后 promoted/consumed 的块语义，占位
+    // 的 user 消息不是被检验的对象；只保留最近 1 条 user，更老的允许被 prune
+    // 折叠、允许进压缩范围（keep=0 = 全部保留时，被块覆盖的占位 user 会撑在
+    // 线上、且让覆盖它们的 m-ref 范围直接抛错）。
+    userVerbatimKeep: 1,
     ...overrides,
   };
 }
@@ -412,6 +417,10 @@ test("promote-after-prune: m-ref range spanning a pruned region consumes the blo
     msg("raw-6", "a6 ".repeat(200), "assistant"),
     msg("raw-7", "u7 ".repeat(200)),
     msg("raw-8", "a8 ".repeat(200), "assistant"),
+    // 尾部再加一轮 user：压缩范围止于 raw-7，而 userVerbatimKeep=1 会把最后
+    // 一条 user 判为受保护（ref 退成 BLOCKED）。让最新一轮 user 落在范围之外，
+    // 既符合真实会话形态，也保证 raw-7 拿到真实编号做范围终点。
+    msg("raw-9", "u9 ".repeat(200)),
   ];
   const state = makeState(
     [{ blockId: "b2", effectiveMessageIds: ["raw-3", "raw-4"] }],
@@ -563,6 +572,11 @@ test("promote-after-prune: m-ref range consumes a block that covers the first us
     msg("raw-11", "u11 ".repeat(200)),
     msg("raw-12", "a12 ".repeat(200), "assistant"),
     msg("raw-13", "u13 ".repeat(200)),
+    // 尾部再加一轮 user：本用例的范围就是 raw-1..raw-13（整个已压缩区段），
+    // 而 userVerbatimKeep=1 总会保留最后一条 user —— 若 raw-13 是最后一条，
+    // 它会退成 BLOCKED 而拿不到编号，范围终点即失效。追加一轮 user 让受保护
+    // 的那条落在范围之外，raw-1 的「首条 user 钉住」语义与 raw-13 的编号都保住。
+    msg("raw-14", "u14 ".repeat(200)),
   ];
   const state = makeState(
     [

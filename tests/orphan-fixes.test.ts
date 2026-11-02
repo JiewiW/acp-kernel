@@ -325,6 +325,10 @@ test("prune: first user message pruned when covered (no duplication)", () => {
     { id: "a0", role: "assistant", contentType: "text", text: "reply" },
     { id: "u1", role: "user", contentType: "text", text: "second" },
     { id: "a1", role: "assistant", contentType: "text", text: "reply2" },
+    // 本用例要验的是「被覆盖的非首条 user 可以被剪掉」，所以不能把 u1 的角色改掉。
+    // 追加一条未被覆盖的尾部 user：方案 B 只保最近 1 条，受保护的就成了它，被覆盖
+    // 的 u1 回到可剪状态（上面那条 tail user 本来也不在折叠范围内）。
+    { id: "u2", role: "user", contentType: "text", text: "third" },
   ];
 
   const state: CompressionState = {
@@ -338,7 +342,9 @@ test("prune: first user message pruned when covered (no duplication)", () => {
     ],
   };
 
-  const result = prune(messages, state);
+  // 方案 B（只保留最近 1 条 user 原文）：把更老的占位 user 从「保护」里释放出来，
+  // 否则 prune 默认 keep=0 会把每条 user 都钉在线上，什么都剪不掉。
+  const result = prune(messages, state, { userVerbatimKeep: 1 });
 
   const resultIds = result.map((m) => m.id);
   assert.ok(
