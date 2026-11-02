@@ -1,4 +1,4 @@
-import { assignRefs, highestUsedIndex, indexToRef } from "./refs.js";
+import { assignRefs, BLOCKED_REF, highestUsedIndex, indexToRef } from "./refs.js";
 import { remintCoveredLiveIds } from "./instance-reid.js";
 import {
   prune,
@@ -874,8 +874,21 @@ const assignRefsNode: PipelineNode = {
         ? isMessageProtected(m, ctx.config) ||
           (latest ? isMessageLatestProtected(m, latest) : false)
         : false);
+    // 方案 B 的逃生阀要求「滑出最近 N 条窗口」的旧 user 轮重新可压。BLOCKED
+    // 一旦落下就永久保留会让旧 user 永远进不了 T3（assignRefs 对已存在的条目
+    // 直接跳过）。每轮按当前窗口重算保护集，释放不再受保护的 BLOCKED 条目，
+    // 由 assignRefs 分配新号（号码不复用，见 AGENTS.md §2 原则 6）。
+    const existing = {
+      byRaw: { ...io.state.messageRefs.byRaw },
+      byRef: { ...io.state.messageRefs.byRef },
+    };
+    for (const message of io.messages) {
+      if (existing.byRaw[message.id] === BLOCKED_REF && !protectedFn(message)) {
+        delete existing.byRaw[message.id];
+      }
+    }
     const refResult = assignRefs(io.messages, {
-      existing: io.state.messageRefs,
+      existing,
       nextIndex: highestUsedIndex(io.state.messageRefs) + 1,
       isProtected: protectedFn,
       // Ephemeral retrieval injections never consume a ref slot.
